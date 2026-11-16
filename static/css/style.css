@@ -1946,28 +1946,40 @@ button:disabled { cursor: not-allowed; }
     align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
-    gap: 8px 14px;
-    padding: 8px 12px;
+    gap: 6px 10px;
+    padding: 6px 10px;
 }
 .top-bar-left {
-    min-width: 0;
-    flex: 1 1 220px;
-    flex-wrap: nowrap;
+    min-width: auto;
+    max-width: 100%;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    gap: 6px 8px;
 }
 .current-file-title {
-    flex: 0 1 auto;
-    max-width: 340px;
-    min-width: 0;
+    flex: 0 1 220px;
+    min-width: 96px;
+    max-width: clamp(110px, 18vw, 280px);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+.review-top-bar .btn-xs,
+.review-top-bar .cmp-btn {
+    min-height: 32px;
+    padding: 3px 9px;
+    font-size: 14px;
+}
+.review-top-bar .review-position {
+    font-size: 14px;
+    flex-shrink: 0;
+}
 .save-badge {
     display: inline-flex;
     align-items: center;
-    padding: 4px 12px;
+    padding: 3px 10px;
     border-radius: 999px;
-    font-size: var(--type-body);
+    font-size: 14px;
     font-weight: 800;
     white-space: nowrap;
     flex-shrink: 0;
@@ -1992,14 +2004,26 @@ button:disabled { cursor: not-allowed; }
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 8px 12px;
+    gap: 6px 10px;
+    flex-shrink: 0;
 }
 .top-bar-right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex-wrap: nowrap;
+    flex-shrink: 0;
     margin-left: auto;
+}
+@media (max-width: 1500px) {
+    .top-bar-left { order: 1; }
+    .top-bar-right { order: 2; margin-left: auto; }
+    .review-mode-bar {
+        order: 3;
+        width: 100%;
+        padding-top: 4px;
+        border-top: 1px solid var(--border-light);
+    }
 }
 
 /* ============================================================================
@@ -2307,4 +2331,85 @@ button:disabled { cursor: not-allowed; }
     color: var(--primary-blue);
     border-color: var(--primary-blue);
     font-weight: 700;
+}
+
+/* ============================================================================
+   UI/UX 響應式優化：
+   1. 區分「主操作按鈕 (.btn)」與「緊湊工具列按鈕 (.btn-xs, .f-chip, .cmp-btn, .util-btn)」尺寸
+   2. 檢視頁底部主操作列 (.review-bottom-bar) 左、中、右三欄對稱置中對齊
+   3. 步驟 2「批次套用」右側寫入預覽清單 (#masterCopyPreviewContainer) 保底閱讀高度
+   ============================================================================ */
+.btn-xs {
+    min-height: 32px;
+    padding: 3px 9px;
+    font-size: 14px;
+}
+.util-btn {
+    min-height: 34px;
+    padding: 4px 10px;
+    font-size: 14px;
+}
+.cmp-btn {
+    min-height: 32px;
+    padding: 4px 10px;
+    font-size: 14px;
+}
+.f-chip {
+    min-height: 28px;
+    padding: 3px 9px;
+    font-size: 13.5px;
+}
+.q-tab {
+    min-height: 32px;
+    padding: 4px 8px;
+    font-size: 14px;
+}
+.box-action-btns-row .btn-xs {
+    min-height: 30px;
+    padding: 3px 8px;
+    font-size: 13.5px;
+}
+
+.review-bottom-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    padding: 8px 16px;
+    gap: 8px 12px;
+}
+.bottom-secondary-left {
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+}
+.bottom-primary-center {
+    flex: 0 0 auto;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.bottom-secondary-right {
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.apply-right-col {
+    overflow-y: auto;
+}
+.advanced-apply-body {
+    max-height: 165px;
+    overflow-y: auto;
+}
+.preview-list-wrap,
+#masterCopyPreviewContainer {
+    flex: 1 1 180px;
+    min-height: 180px;
+    overflow-y: auto;
 }
