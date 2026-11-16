@@ -1,0 +1,3389 @@
+/**
+ * AI 影像標記工具 - 前端核心互動與狀態管理
+ * 設計重點：
+ * 1. 雙面向狀態分離：面向 A (檔案與格式檢查 format_status) vs 面向 B (人工作業進度 review_status)
+ * 2. 三步驟清晰動線：1. 載入資料 -> 2. 批次套用 -> 3. 檢查與微調
+ * 3. 真實儲存狀態回饋、防長按誤觸 (e.repeat)、佇列導向審核
+ */
+
+let scanData = null;
+
+function workspaceFetch(url, options = {}, workspace = scanData?.workspace_id) {
+    return fetch(url, { ...options, headers: {
+        ...options.headers, 'X-YOLO-Workspace': workspace || ''
+    }}).then(response => {
+        const readJson = response.json.bind(response);
+        response.json = async () => {
+            const data = await readJson();
+            return workspace === scanData?.workspace_id ? data : { ok: false, error: '已切換專案，忽略舊專案回應。' };
+        };
+        return response;
+    });
+}
+
+function workspaceImage(stem, cacheBust = false) {
+    if (window.YoloWebEngine && typeof window.YoloWebEngine.isActive === 'function' && window.YoloWebEngine.isActive()) {
+        return window.YoloWebEngine.getImageUrl(stem);
+    }
+    const base = `/api/image/${encodeURIComponent(stem)}?workspace=${encodeURIComponent(scanData?.workspace_id || '')}`;
+    return cacheBust ? `${base}&t=${Date.now()}` : base;
+}
+
+let currentStep = 'load'; // 'load' | 'apply' | 'review'
+
+// 步驟 2 (批次套用) 狀態
+let masterStem = null;
+let copySelectedStems = new Set();
+let similarityMap = {}; // stem -> { similarity, reason }
+let recommendedGroups = [];
+
+// 步驟 3 (檢查與微調) 狀態
+let reviewQueue = []; // 本次待檢查佇列 (stems)
+let reviewScope = 'queue'; // 'queue' | 'all'
+let currentFilter = 'all';
+let activeStem = null;
+let previewMode = 'single'; // 'single' | 'side_by_side' | 'overlay'
+let overlayAlpha = 0.45;
+let zoomMultiplier = 1.0;
+
+// 畫布互動與儲存狀態
+let targetImgObj = null;
+let masterImgObj = null;
+let canvasRenderState = null;
+let selectedBoxIndex = -1;
+let dragAction = null;
+let isDrawBoxMode = false;
+let defaultDrawClassId = 0;
+let canvasHoverPos = null;
+let pendingNewBox = null;
+let pendingClassEditBoxIdx = -1;
+let isSavingCanvas = false;
+let activeSavePromise = null;
+let reviewUpdatePending = false;
+let lastSaveFailed = false;
+let pendingSavePayload = null;
+
+const CLASS_COLORS = [
+    '#2874A6', '#1E8449', '#D35400', '#8E44AD',
+    '#C0392B', '#117864', '#B9770E', '#2E4053'
+];
+
+// ============================================================================
+// 初始化與啟動檢查
+// ============================================================================
+window.addEventListener('DOMContentLoaded', () => {
+
+    initCanvasInteraction();
+    initPhotoListWidth();
+    document.documentElement.dataset.textSize = 'standard';
+    if (typeof ResizeObserver !== 'undefined') {
+        const observer = new ResizeObserver(() => {
+            if (currentStep === 'review') redrawCanvases();
+        });
+        observer.observe(document.getElementById('mainCanvasWrapper'));
+        observer.observe(document.getElementById('masterCanvasWrapper'));
+    }
+    initKeyboardShortcuts();
+
+    window.addEventListener('resize', () => {
+        if (currentStep === 'review') updateReviewLayout();
+    });
+});
+
+
+
+
+
+// ============================================================================
+// 導覽切換與狀態保存
+// ============================================================================
+function switchStep(stepName) {
+    if (stepName === 'load' && scanData?.ok) { openModal('pathSettingsModal'); return; }
+    if (stepName !== 'load' && (!scanData || !scanData.ok)) {
+        showToast('請先載入照片資料夾', 'warn');
+        return;
+    }
+    currentStep = stepName;
+
+    document.querySelectorAll('.workspace-nav-btn').forEach(btn => {
+        const active = btn.dataset.step === stepName;
+        btn.classList.toggle('active', active);
+        if (active) btn.setAttribute('aria-current', 'page');
+        else btn.removeAttribute('aria-current');
+    });
+    document.querySelectorAll('.step-view').forEach(sec => {
+        sec.classList.toggle('active', sec.id === `step-${stepName}`);
+    });
+
+    if (stepName === 'apply') {
+        renderBatchApplyStep();
+    } else if (stepName === 'review') {
+        setReviewScope(reviewScope);
+        setTimeout(updateReviewLayout, 30);
+    }
+}
+
+async function saveSessionProgress() {
+    if (!scanData || !scanData.ok) return;
+    try {
+        await workspaceFetch('/api/save_session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                active_stem: activeStem || '',
+                master_stem: masterStem || '',
+                current_filter: currentFilter,
+                review_queue: reviewQueue
+            })
+        });
+    } catch (_) {}
+}
+
+// ============================================================================
+// 步驟 1：載入資料與掃描
+// ============================================================================
+let isPickingPath = false;
+
+async function pickAndLoadFolder() {
+    if (isPickingPath) {
+        showToast('資料夾選擇視窗已經開啟，請查看桌面或工作列彈出視窗。', 'info');
+        return;
+    }
+    isPickingPath = true;
+    const welcomeBtn = document.getElementById('btnWelcomePickFolder');
+    const origText = welcomeBtn ? welcomeBtn.textContent : '選擇照片資料夾';
+    if (welcomeBtn) {
+        welcomeBtn.disabled = true;
+        welcomeBtn.textContent = '正在開啟資料夾選擇視窗...';
+    }
+    showToast(window.YOLO_WEB_MODE ? '請在彈出的視窗選擇照片資料夾並點選「允許」...' : '正在開啟 Windows 資料夾選擇視窗...', 'info');
+
+    try {
+        const res = await fetch('/api/pick_path', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'folder', title: '選擇照片與標記檔所在的資料夾' })
+        });
+        const data = await res.json();
+        if (data.ok && data.path) {
+            // 重設前次範例或前次專案的殘留選擇狀態
+            masterStem = null;
+            copySelectedStems.clear();
+            reviewQueue = [];
+            activeStem = null;
+            similarityMap = {};
+
+            document.getElementById('inputImageDir').value = data.path;
+            document.getElementById('inputImageDirLoaded').value = data.path;
+            document.getElementById('chkSameFolder').checked = true;
+            document.getElementById('inputLabelDir').value = '';
+            document.getElementById('inputClassesPath').value = '';
+            toggleSameFolderMode();
+            await scanCurrentWorkspace({ restoreSession: true });
+            showToast(`已成功載入資料夾：${scanData?.folder_name || data.path}`, 'success');
+        } else if (data.ok && data.cancelled) {
+            showToast('已取消選擇資料夾', 'info');
+        } else {
+            showToast(data.error || '無法開啟系統資料夾選擇器，已為您展開手動路徑輸入框。', 'warn');
+            const detailsEl = document.querySelector('.manual-path-details');
+            if (detailsEl) detailsEl.open = true;
+            toggleLoadSettingsPanel(true);
+        }
+    } catch (e) {
+        showToast('無法開啟系統資料夾選擇器，請於下方手動貼上資料夾路徑。', 'error');
+        const detailsEl = document.querySelector('.manual-path-details');
+        if (detailsEl) detailsEl.open = true;
+        toggleLoadSettingsPanel(true);
+    } finally {
+        isPickingPath = false;
+        if (welcomeBtn) {
+            welcomeBtn.disabled = false;
+            welcomeBtn.textContent = origText;
+        }
+    }
+}
+
+async function pickPath(inputId, mode) {
+    if (isPickingPath) {
+        showToast('選擇視窗已經開啟，請查看桌面或工作列彈出視窗。', 'info');
+        return;
+    }
+    isPickingPath = true;
+    showToast('正在開啟系統選擇視窗...', 'info');
+    try {
+        const res = await fetch('/api/pick_path', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode })
+        });
+        const data = await res.json();
+        if (data.ok && data.path) {
+            document.getElementById(inputId).value = data.path;
+            if (inputId === 'inputCopyOutputDir') {
+                runMasterCopyPreview();
+            } else if (inputId === 'inputImageDirLoaded') {
+                masterStem = null;
+                copySelectedStems.clear();
+                reviewQueue = [];
+                activeStem = null;
+                similarityMap = {};
+                await rescanFromLoadedSettings();
+            }
+        } else if (!data.ok) {
+            showToast(data.error || '無法開啟選擇視窗，請直接貼上路徑', 'warn');
+        }
+    } catch (e) {
+        showToast('無法開啟檔案選擇視窗', 'error');
+    } finally {
+        isPickingPath = false;
+    }
+}
+
+async function openInExplorer(inputOrElemId) {
+    const el = document.getElementById(inputOrElemId);
+    const pathVal = el ? (el.value || el.textContent) : '';
+    if (!pathVal) return;
+    await openFolderPath(pathVal.trim());
+}
+
+async function openFolderPath(path) {
+    try {
+        const response = await fetch('/api/open_folder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path })
+        });
+        const data = await response.json();
+        if (!data.ok) showToast(data.error || '無法開啟資料夾', 'error');
+    } catch {
+        showToast('無法連線開啟資料夾', 'error');
+    }
+}
+
+function toggleSameFolderMode() {
+    const same = document.getElementById('chkSameFolder').checked;
+    document.getElementById('separateLabelDirGroup').style.display = same ? 'none' : 'flex';
+}
+
+function toggleLoadSettingsPanel() { openModal('pathSettingsModal'); }
+
+
+
+async function rescanFromLoadedSettings() {
+    const dirLoaded = document.getElementById('inputImageDirLoaded').value.trim();
+    if (dirLoaded) {
+        document.getElementById('inputImageDir').value = dirLoaded;
+    }
+    await scanCurrentWorkspace();
+    if (scanData?.ok) closeModal('pathSettingsModal');
+}
+
+let scanRequestId = 0;
+let pendingWorkspaceScan = false;
+async function scanCurrentWorkspace(options = {}) {
+    if (options.refreshBoundWorkspace && pendingWorkspaceScan) return;
+    const bound = options.refreshBoundWorkspace ? scanData : null;
+    const imgDir = bound?.image_dir || (document.getElementById('inputImageDir').value || '').trim();
+    const sameFolder = document.getElementById('chkSameFolder').checked;
+    let lblDir = bound?.label_dir || (sameFolder ? imgDir : (document.getElementById('inputLabelDir').value || '').trim());
+    let clsPath = bound?.classes_path ?? (document.getElementById('inputClassesPath').value || '').trim();
+    if (scanData && imgDir !== scanData.image_dir) {
+        if (lblDir === scanData.label_dir) lblDir = imgDir;
+        if (clsPath === scanData.classes_path) clsPath = '';
+    }
+
+    if (!imgDir) {
+        showToast('請先選擇或輸入照片資料夾路徑', 'warn');
+        return;
+    }
+
+    const requestId = ++scanRequestId;
+    pendingWorkspaceScan = true;
+    const status = document.getElementById('workspaceLoadStatus');
+    status.hidden = false;
+    status.textContent = '正在掃描照片與標記檔…';
+    try {
+        const res = await fetch('/api/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                image_dir: imgDir,
+                label_dir: lblDir,
+                classes_path: clsPath
+            })
+        });
+        const data = await res.json();
+        if (requestId !== scanRequestId) return;
+        if (!data.ok) {
+            // 保留既有狀態，不清空畫面
+            status.textContent = data.error || '讀取資料夾失敗，請確認路徑是否存在。';
+            return;
+        }
+
+        if (scanData?.workspace_id !== data.workspace_id) {
+            masterStem = null;
+            activeStem = null;
+            copySelectedStems.clear();
+            reviewQueue = [];
+            similarityMap = {};
+            recommendedGroups = [];
+            currentFilter = 'all';
+            document.getElementById('searchInput').value = '';
+            document.querySelectorAll('#allScopeFilterChips .f-chip').forEach(button => {
+                button.classList.toggle('active', button.dataset.filter === 'all');
+                button.setAttribute('aria-pressed', String(button.dataset.filter === 'all'));
+            });
+            invalidateRemapPreview();
+            document.getElementById('applySuccessBanner').style.display = 'none';
+            document.getElementById('inputCopyOutputDir').value = '';
+            document.getElementById('chkOverwriteExisting').checked = false;
+            canvasImageRequest++;
+            isSavingCanvas = false;
+            activeSavePromise = null;
+            pendingSavePayload = null;
+            lastSaveFailed = false;
+            dragAction = null;
+            selectedBoxIndex = -1;
+        }
+        scanData = data;
+        status.hidden = true;
+        document.getElementById('inputImageDir').value = data.image_dir;
+        document.getElementById('inputImageDirLoaded').value = data.image_dir;
+        document.getElementById('inputLabelDir').value = data.label_dir;
+        document.getElementById('chkSameFolder').checked = data.image_dir === data.label_dir;
+        toggleSameFolderMode();
+        document.getElementById('inputClassesPath').value = data.classes_path || '';
+
+        // 切換歡迎頁 -> 載入後摘要頁
+        document.getElementById('welcomeLandingCard').style.display = 'none';
+        document.getElementById('loadedSummaryArea').style.display = 'flex';
+
+        // 選擇預設參考照片 (優先沿用原 masterStem 或 session 紀錄)
+        const validRefs = (data.items || []).filter(i => i.is_valid_reference);
+        const sessionInfo = data.session || {};
+        if (masterStem && validRefs.some(i => i.stem === masterStem)) {
+            // keep current masterStem
+        } else if (sessionInfo.last_master_stem && validRefs.some(i => i.stem === sessionInfo.last_master_stem)) {
+            masterStem = sessionInfo.last_master_stem;
+        } else {
+            masterStem = validRefs.length > 0 ? validRefs[0].stem : null;
+        }
+
+        // 還原佇列與目前選取照片
+        if (options.restoreSession && Array.isArray(sessionInfo.review_queue) && sessionInfo.review_queue.length > 0) {
+            reviewQueue = sessionInfo.review_queue.filter(st => data.items.some(i => i.stem === st));
+        } else if (reviewQueue.length > 0) {
+            reviewQueue = reviewQueue.filter(st => data.items.some(i => i.stem === st));
+        }
+
+        if (activeStem && data.items.some(i => i.stem === activeStem)) {
+            // keep activeStem
+        } else if (sessionInfo.last_active_stem && data.items.some(i => i.stem === sessionInfo.last_active_stem)) {
+            activeStem = sessionInfo.last_active_stem;
+        } else {
+            const firstPhoto = data.items.find(i => i.has_image);
+            activeStem = firstPhoto ? firstPhoto.stem : null;
+        }
+
+        for (const stem of copySelectedStems) {
+            if (stem === masterStem || !data.items.some(item => item.stem === stem && item.has_image)) {
+                copySelectedStems.delete(stem);
+            }
+        }
+
+        updateHeaderAndNavBadges();
+        renderLoadStepSummary();
+        renderClassRemapEditor();
+
+        if (data.summary.photo_count === 0) {
+            switchStep('load');
+        } else if (options.keepStep) {
+            switchStep(currentStep);
+        } else {
+            reviewScope = 'all';
+            switchStep('review');
+        }
+    } catch (err) {
+        console.error(err);
+        if (requestId === scanRequestId) {
+            status.hidden = false;
+            status.textContent = '掃描時連線中斷。請確認工具仍在執行，再重新載入。';
+        }
+    } finally {
+        if (requestId === scanRequestId) pendingWorkspaceScan = false;
+    }
+}
+
+// ============================================================================
+// 頁首、導覽列與步驟 1 摘要渲染
+// ============================================================================
+function updateHeaderAndNavBadges() {
+    if (!scanData || !scanData.ok) return;
+    const s = scanData.summary;
+
+    // 頁首只顯示資料夾名稱，完整路徑收進彈窗
+    const folderBox = document.getElementById('headerFolderBox');
+    const folderBtn = document.getElementById('headerFolderName');
+    folderBox.style.display = 'inline-flex';
+    folderBtn.textContent = scanData.folder_name || scanData.image_dir;
+    folderBtn.title = `完整路徑：${scanData.image_dir} (點擊查看詳情)`;
+
+    document.getElementById('detailFullImageDir').textContent = scanData.image_dir || '';
+    document.getElementById('detailFullLabelDir').textContent = scanData.label_dir || '';
+    document.getElementById('detailFullClassesPath').textContent = scanData.classes_path || '（未找到 classes.txt）';
+
+    // 啟用步驟與工具按鈕
+    document.getElementById('navBtnApply').disabled = (s.photo_count === 0);
+    document.getElementById('navBtnReview').disabled = (s.photo_count === 0);
+    document.getElementById('btnUtilRemap').disabled = (s.photo_count === 0);
+
+    const hasUndo = Boolean(scanData.last_backup && scanData.last_backup.backup_id);
+    document.getElementById('btnQuickUndo').disabled = !hasUndo;
+
+    // 導覽列數字提醒
+    const badgeUnlabeled = document.getElementById('navBadgeUnlabeled');
+    if (s.unlabeled_count > 0) {
+        badgeUnlabeled.style.display = 'inline-block';
+        badgeUnlabeled.textContent = `未標記 ${s.unlabeled_count}`;
+    } else {
+        badgeUnlabeled.style.display = 'none';
+    }
+
+    const needReviewCnt = s.pending_review_count + s.needs_fix_count;
+    const badgePending = document.getElementById('navBadgePending');
+    if (needReviewCnt > 0) {
+        badgePending.style.display = 'inline-block';
+        badgePending.textContent = `待確認 ${needReviewCnt}`;
+    } else {
+        badgePending.style.display = 'none';
+    }
+}
+
+function renderLoadStepSummary() {
+    if (!scanData || !scanData.ok) return;
+    const s = scanData.summary;
+
+    document.getElementById('summaryFolderNameTag').textContent = `資料夾：${scanData.folder_name}`;
+
+    const clsTag = document.getElementById('summaryClassesTag');
+    clsTag.textContent = scanData.classes_file_exists ? '' : '缺少類別檔';
+    clsTag.hidden = scanData.classes_file_exists;
+
+    // 主要行動摘要橫幅 (Action Hero Card)
+    const headlineEl = document.getElementById('actionHeroHeadline');
+    const subtextEl = document.getElementById('actionHeroSubtext');
+    const btnsEl = document.getElementById('actionHeroButtons');
+
+    if (s.photo_count === 0) {
+        headlineEl.textContent = '沒有找到照片';
+        subtextEl.textContent = '';
+        btnsEl.innerHTML = `
+            <button class="btn btn-primary btn-lg" onclick="pickAndLoadFolder()">重新選擇照片資料夾</button>
+            <button class="btn btn-secondary btn-lg" onclick="loadSampleDataset()">用範例試一次</button>
+        `;
+    } else if (s.reference_candidate_count === 0) {
+        headlineEl.textContent = `缺少參考照片`;
+        subtextEl.textContent = '請先標記一張照片。';
+        btnsEl.innerHTML = `
+            <button class="btn btn-primary btn-lg" onclick="startLabelingFirstPhoto()">前往畫布先標記第 1 張照片</button>
+            <button class="btn btn-secondary" onclick="switchStep('review')">進入檢查與微調檢視照片</button>
+        `;
+    } else if (s.unlabeled_count > 0) {
+        headlineEl.textContent = `${s.unlabeled_count} 張未標記`;
+        subtextEl.textContent = `共 ${s.photo_count} 張照片`;
+        btnsEl.innerHTML = `
+            <button class="btn btn-primary btn-xl" onclick="startBatchApplyForUnlabeled()">
+                選擇要套用的照片 →
+            </button>
+            <button class="btn btn-secondary" onclick="switchStep('review')">直接進入檢查與微調</button>
+        `;
+    } else if (s.pending_review_count + s.needs_fix_count > 0) {
+        const todoCnt = s.pending_review_count + s.needs_fix_count;
+        headlineEl.textContent = `${todoCnt} 張待確認`;
+        subtextEl.textContent = `共 ${s.photo_count} 張照片`;
+        btnsEl.innerHTML = `
+            <button class="btn btn-primary btn-xl" onclick="startReviewForPendingItems()">
+                開始檢查這 ${todoCnt} 張 →
+            </button>
+            <button class="btn btn-secondary" onclick="switchStep('apply')">前往批次套用</button>
+        `;
+    } else {
+        headlineEl.textContent = `已確認全部 ${s.photo_count} 張`;
+        subtextEl.textContent = ``;
+        btnsEl.innerHTML = `
+            <button class="btn btn-secondary" onclick="switchStep('review')">進入檢查與微調</button>
+        `;
+    }
+
+    // 雙面向統計卡片（所有百分比皆附帶分母）
+    document.getElementById('statPhotoCnt').textContent = s.photo_count;
+    document.getElementById('statRevUnlabeled').textContent = s.unlabeled_count;
+    document.getElementById('statRevPending').textContent = s.pending_review_count;
+    document.getElementById('statRevNeedsFix').textContent = s.needs_fix_count;
+    document.getElementById('statRevConfirmed').textContent = s.confirmed_count;
+
+    // 同類問題分組清單
+    renderIssueGroups(scanData.issue_groups || []);
+}
+
+function renderIssueGroups(groups) {
+    const container = document.getElementById('issueGroupsContainer');
+    if (!container) return;
+
+    if (!groups || groups.length === 0) {
+        const summary = scanData?.summary || {};
+        const pending = Math.max(0, (summary.photo_count || 0) - (summary.confirmed_count || 0));
+        const message = !summary.photo_count ? '目前沒有可檢查的照片。'
+            : pending ? `格式正常 · ${pending} 張待確認或修正`
+            : '所有照片皆已確認完成。';
+        container.innerHTML = `
+            <div class="project-normal-note">
+                ${message}
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = groups.map((g, idx) => {
+        let badgeClass = 'badge-info';
+        let badgeSymbol = '[待處理]';
+        if (g.level === 'error') { badgeClass = 'badge-err'; badgeSymbol = '[✕ 錯誤]'; }
+        else if (g.level === 'warning') { badgeClass = 'badge-warn'; badgeSymbol = '[! 提醒]'; }
+
+        const filesHtml = (g.stems || []).map(st => {
+            const item = scanData.items.find(i => i.stem === st);
+            const fname = item ? (item.image_name || item.label_name) : st;
+            const statusText = item ? `${item.format_label} · ${item.review_label}` : '';
+            return `
+                <div class="issue-file-row">
+                    <span><strong>${escapeHtml(fname)}</strong> <span class="muted-text">(${escapeHtml(statusText)})</span></span>
+                    <button class="btn-xs" onclick="jumpToSingleItemInReview('${escapeJsStr(st)}')">檢視此張</button>
+                </div>
+            `;
+        }).join('');
+
+        return `
+            <div class="issue-group-item">
+                <div class="issue-group-header">
+                    <div>
+                        <div class="issue-group-title-box">
+                            <span class="badge ${badgeClass}">${badgeSymbol} ${g.count} 項</span>
+                            <span class="issue-group-title">${escapeHtml(g.title)}</span>
+                        </div>
+                        
+                    </div>
+                    <div class="issue-group-actions">
+                        <button class="btn-xs" onclick="toggleIssueGroupFiles('issueFiles_${idx}')">
+                            查看檔案
+                        </button>
+                        <button class="btn btn-primary btn-sm" onclick="handleIssueGroupAction('${escapeJsStr(g.action_type)}', ${idx})">
+                            ${escapeHtml(g.action_label)}
+                        </button>
+                    </div>
+                </div>
+                <div id="issueFiles_${idx}" class="issue-group-files">
+                    <p class="muted-text">${escapeHtml(g.description)}</p>
+                    ${filesHtml}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function toggleIssueGroupFiles(elemId) {
+    const el = document.getElementById(elemId);
+    if (el) el.classList.toggle('open');
+}
+
+function handleIssueGroupAction(actionType, groupIdx) {
+    const group = (scanData.issue_groups || [])[groupIdx];
+    if (!group) return;
+
+    if (actionType === 'go_batch_apply') {
+        startBatchApplyForUnlabeled();
+    } else if (actionType === 'open_class_remap') {
+        openModal('remapModal');
+    } else if (actionType === 'review_group_items') {
+        const stems = (group.stems || []).filter(st => scanData.items.some(i => i.stem === st && i.has_image));
+        presetReviewFilter('all');
+        if (stems.length > 0) activeStem = stems[0];
+        switchStep('review');
+    }
+}
+
+// 預先設定檢視清單的快速篩選（不立即重繪，供切換頁面前使用）
+function presetReviewFilter(filterName) {
+    currentFilter = filterName;
+    reviewScope = 'all';
+    const search = document.getElementById('searchInput');
+    if (search) search.value = '';
+    document.querySelectorAll('#allScopeFilterChips .f-chip').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.filter === filterName);
+        btn.setAttribute('aria-pressed', String(btn.dataset.filter === filterName));
+    });
+}
+
+function startBatchApplyForUnlabeled() {
+    if (!scanData) return;
+    document.getElementById('applySuccessBanner').style.display = 'none';
+    switchStep('apply');
+}
+
+function startReviewForPendingItems() {
+    if (!scanData) return;
+    presetReviewFilter('pending_review');
+    const first = scanData.items.find(i => i.has_image && (i.review_status === 'pending_review' || i.review_status === 'needs_fix'));
+    if (first) activeStem = first.stem;
+    switchStep('review');
+}
+
+function jumpToSingleItemInReview(stem) {
+    presetReviewFilter('all');
+    activeStem = stem;
+    switchStep('review');
+}
+
+function startLabelingFirstPhoto() {
+    if (!scanData || !scanData.items.length) return;
+    const firstPhoto = scanData.items.find(i => i.has_image);
+    if (!firstPhoto) return;
+    activeStem = firstPhoto.stem;
+    switchStep('review');
+    toggleDrawBoxMode(true);
+    showToast('已開啟「＋ 新增框 (W)」模式，請直接在畫布拖曳拉出標記框', 'info');
+}
+
+// ============================================================================
+// 步驟 2：批次套用 (1. 選參考照片 -> 2. 選要套用的照片 -> 3. 預覽並建立標記草稿)
+// ============================================================================
+function renderBatchApplyStep() {
+    if (!scanData || !scanData.ok) return;
+    renderReferenceSelector();
+    renderClassFilterCheckboxes();
+    renderCopyPhotoGrid();
+    runMasterCopyPreview();
+}
+
+function renderReferenceSelector() {
+    const container = document.getElementById('referenceSelectorArea');
+    const validRefs = (scanData.items || []).filter(i => i.is_valid_reference);
+
+    if (validRefs.length === 0) {
+        container.innerHTML = `
+            <div style="color:var(--status-red);font-weight:700;">
+                缺少可用的參考照片。
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="startLabelingFirstPhoto()">前往畫布標記第 1 張照片</button>
+        `;
+        return;
+    }
+
+    if (!masterStem || !validRefs.some(i => i.stem === masterStem)) {
+        masterStem = validRefs[0].stem;
+    }
+    const curRef = validRefs.find(i => i.stem === masterStem);
+    const optionsHtml = validRefs.map(item => `
+        <option value="${escapeHtml(item.stem)}" ${item.stem === masterStem ? 'selected' : ''}>
+            ${escapeHtml(item.image_name)}
+        </option>
+    `).join('');
+
+    const classSummary = curRef
+        ? Array.from(new Set(curRef.boxes.map(b => b.class_name))).join(', ')
+        : '';
+
+    container.innerHTML = `
+        <div class="ref-thumb-box">
+            <img class="ref-thumb-img" src="${workspaceImage(masterStem, true)}" alt="參考照片縮圖">
+            <div>
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <select class="form-select-sm" style="font-weight:700;min-width:0;width:100%;" onchange="changeReferencePhoto(this.value)">
+                        ${optionsHtml}
+                    </select>
+                </div>
+                <div class="muted-text" style="margin-top:4px;">
+                    ${curRef.box_count} 框 · ${escapeHtml(classSummary)}
+                </div>
+            </div>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="jumpToSingleItemInReview('${escapeJsStr(masterStem)}')">
+            檢視參考照片
+        </button>
+    `;
+}
+
+function changeReferencePhoto(newStem) {
+    masterStem = newStem;
+    copySelectedStems.delete(newStem);
+    similarityMap = {};
+    document.getElementById('recommendedGroupsBar').style.display = 'none';
+    renderBatchApplyStep();
+    saveSessionProgress();
+}
+
+function renderClassFilterCheckboxes() {
+    const wrap = document.getElementById('copyClassFilterCheckboxes');
+    const curRef = scanData.items.find(i => i.stem === masterStem);
+    if (!curRef || !curRef.boxes.length) {
+        wrap.innerHTML = '<span class="muted-text">無可篩選類別</span>';
+        return;
+    }
+
+    const classCounts = {};
+    curRef.boxes.forEach(b => {
+        classCounts[b.class_id] = (classCounts[b.class_id] || 0) + 1;
+    });
+
+    wrap.innerHTML = Object.keys(classCounts).map(cid => {
+        const cname = scanData.classes[cid] || `類別#${cid}`;
+        return `
+            <label class="checkbox-inline">
+                <input type="checkbox" class="copy-cls-chk" value="${cid}" checked onchange="runMasterCopyPreview()">
+                <span>[${cid}] ${escapeHtml(cname)} (${classCounts[cid]}框)</span>
+            </label>
+        `;
+    }).join('');
+}
+
+function renderCopyPhotoGrid() {
+    const grid = document.getElementById('copyPhotoGrid');
+    document.getElementById('copyTargetCount').textContent = copySelectedStems.size;
+
+    const focusedStem = document.activeElement?.dataset?.copyStem;
+    const photos = (scanData.items || []).filter(i => i.has_image);
+    grid.innerHTML = photos.map(item => {
+        const isRef = item.stem === masterStem;
+        const isSel = copySelectedStems.has(item.stem);
+        const simInfo = similarityMap[item.stem];
+
+        let cardCls = 'photo-card';
+        let roleTag = '';
+        if (isRef) {
+            cardCls += ' is-reference';
+            roleTag = `<span class="card-role-tag ref">參考</span>`;
+        } else if (isSel) {
+            cardCls += ' is-selected';
+            roleTag = `<span class="card-role-tag sel">已選</span>`;
+        }
+
+        const statusBadge = item.has_label
+            ? `<span class="badge ${item.review_status === 'confirmed' ? 'badge-ok' : 'badge-warn'}">${escapeHtml(item.review_label)} (${item.box_count}框)</span>`
+            : `<span class="badge badge-info">未標記</span>`;
+
+        const simHtml = (!isRef && simInfo)
+            ? `<div style="font-size:var(--type-small);color:var(--primary-blue);font-weight:600;">${escapeHtml(simInfo.reason)}</div>`
+            : '';
+
+        return `
+            <button type="button" class="${cardCls}" data-copy-stem="${escapeHtml(item.stem)}" aria-pressed="${isSel}" aria-disabled="${isRef}" onclick="togglePhotoCardSelection('${escapeJsStr(item.stem)}')">
+                <div class="photo-card-thumb">
+                    <img src="${workspaceImage(item.stem)}" loading="lazy" alt="${escapeHtml(item.image_name)}">
+                    ${roleTag}
+                </div>
+                <div class="photo-card-body">
+                    <div class="photo-card-title" title="${escapeHtml(item.image_name)}">${escapeHtml(item.image_name)}</div>
+                    <div>${statusBadge}</div>
+                    ${simHtml}
+                </div>
+            </button>
+        `;
+    }).join('');
+    if (focusedStem) Array.from(grid.querySelectorAll('[data-copy-stem]')).find(el => el.dataset.copyStem === focusedStem)?.focus();
+}
+
+function togglePhotoCardSelection(stem) {
+    if (stem === masterStem) {
+        showToast('此張是目前選定的「參考照片」，無須複製給自己。', 'info');
+        return;
+    }
+    if (copySelectedStems.has(stem)) {
+        copySelectedStems.delete(stem);
+    } else {
+        copySelectedStems.add(stem);
+    }
+    renderCopyPhotoGrid();
+    runMasterCopyPreview();
+}
+
+function selectAllUnlabeledForCopy() {
+    copySelectedStems.clear();
+    (scanData.items || []).forEach(item => {
+        if (item.has_image && !item.has_label && item.stem !== masterStem) {
+            copySelectedStems.add(item.stem);
+        }
+    });
+    renderCopyPhotoGrid();
+    runMasterCopyPreview();
+}
+
+function clearAllCopyTargets() {
+    copySelectedStems.clear();
+    renderCopyPhotoGrid();
+    runMasterCopyPreview();
+}
+
+async function runSimilarPhotoFinder() {
+    if (!masterStem) {
+        showToast('請先選擇一張參考照片', 'warn');
+        return;
+    }
+    const method = 'visual';
+    const thresholdValue = parseFloat(document.getElementById('numSimThreshold').value);
+    const threshold = Number.isFinite(thresholdValue) ? thresholdValue : 0.75;
+
+    try {
+        const res = await workspaceFetch('/api/group', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                method,
+                threshold,
+                master_stem: masterStem
+            })
+        });
+        const data = await res.json();
+        if (!data.ok) {
+            showToast(data.error || '找出相似照片失敗', 'error');
+            return;
+        }
+
+        similarityMap = {};
+        let matchedStems = [];
+        recommendedGroups = data.groups || [];
+
+        recommendedGroups.forEach(g => {
+            const members = Array.isArray(g.members) ? g.members : [
+                ...(g.recommended_master ? [{ stem: g.recommended_master, similarity: 1, reason: '參考照片' }] : []),
+                ...(g.targets || [])
+            ];
+            const hasMaster = members.some(m => m.stem === masterStem);
+            members.forEach(m => {
+                similarityMap[m.stem] = {
+                    similarity: m.similarity,
+                    reason: m.reason
+                };
+                if (hasMaster && m.stem !== masterStem && m.similarity >= threshold) {
+                    matchedStems.push(m.stem);
+                }
+            });
+        });
+
+        // 自動勾選與參考照片同組且符合門檻的未標記照片
+        const overwrite = document.getElementById('chkOverwriteExisting').checked;
+        copySelectedStems.clear();
+        matchedStems.forEach(st => {
+            const item = scanData.items.find(i => i.stem === st);
+            if (item && (!item.has_label || overwrite)) {
+                copySelectedStems.add(st);
+            }
+        });
+
+        const strip = document.getElementById('recommendedGroupsBar');
+        strip.style.display = 'flex';
+        strip.innerHTML = `
+            <span style="font-weight:700;color:var(--status-amber);">
+                已選 ${copySelectedStems.size} / ${matchedStems.length} 張相似照片。
+            </span>
+        `;
+
+        if (data.warnings?.length) {
+            strip.innerHTML += `<span class="text-amber">${escapeHtml(data.warnings.join('；'))}</span>`;
+        }
+        renderCopyPhotoGrid();
+        runMasterCopyPreview();
+    } catch (e) {
+        showToast('執行相似照片比對時發生錯誤', 'error');
+    }
+}
+
+function getSelectedCopyClassIds() {
+    const chks = document.querySelectorAll('.copy-cls-chk');
+    if (!chks.length) return null;
+    const selected = [];
+    chks.forEach(c => {
+        if (c.checked) selected.push(parseInt(c.value, 10));
+    });
+    return selected;
+}
+
+let copyPreviewRequest = 0;
+let copyInProgress = false;
+let validatedCopyPayload = null;
+
+function currentCopyPayload() {
+    return {
+        master_stem: masterStem,
+        target_stems: Array.from(copySelectedStems),
+        overwrite: document.getElementById('chkOverwriteExisting').checked,
+        output_dir: document.getElementById('inputCopyOutputDir').value.trim() || null,
+        selected_classes: getSelectedCopyClassIds()
+    };
+}
+
+function copyPreviewMessage(message, action = '') {
+    const el = document.getElementById('copyPreviewStatus');
+    el.replaceChildren();
+    const text = document.createElement('span');
+    text.textContent = message;
+    el.appendChild(text);
+    if (action === 'retry') {
+        const button = document.createElement('button');
+        button.type = 'button'; button.className = 'btn-link';
+        button.textContent = '重試預覽';
+        button.onclick = runMasterCopyPreview;
+        el.appendChild(button);
+    }
+}
+
+function renderWritePreview(items) {
+    if (!items.length) return '<p class="empty-state">請選擇要套用的照片。</p>';
+    return '<ul class="write-preview-list">' + items.map(p => {
+        const labels = {will_create: ['新增', 'badge-ok'], will_overwrite: ['覆蓋', 'badge-warn'],
+            skip_existing: ['略過', 'badge-neutral'], skip_self: ['略過', 'badge-neutral']};
+        const [label, style] = labels[p.action] || ['阻擋', 'badge-err'];
+        const detail = [...(p.warnings || [])];
+        if (p.action !== 'will_create' && p.reason) detail.unshift(p.reason);
+        return `<li class="write-preview-item">
+            <details class="preview-file"><summary title="展開完整檔名">${escapeHtml(p.image_name)}</summary>
+                <div class="full-file-name">${escapeHtml(p.image_name)}</div></details>
+            <span class="badge ${style}">${label}</span>
+            ${detail.length ? `<p class="preview-reason">${escapeHtml(detail.join('；'))}</p>` : ''}
+        </li>`;
+    }).join('') + '</ul>';
+}
+
+async function runMasterCopyPreview() {
+    if (copyInProgress) return;
+    const requestId = ++copyPreviewRequest;
+    validatedCopyPayload = null;
+    const summaryBox = document.getElementById('applySummaryCards');
+    const previewContainer = document.getElementById('masterCopyPreviewContainer');
+    const execBtn = document.getElementById('btnExecuteMasterCopy');
+    execBtn.disabled = true; execBtn.textContent = '建立草稿';
+    copyPreviewMessage('正在更新寫入預覽…');
+    if (!masterStem) {
+        summaryBox.textContent = '尚無可用的批次參考';
+        previewContainer.innerHTML = '<p class="empty-state">先準備一張已有標記的照片。</p>';
+        copyPreviewMessage('請先選擇有效的批次參考照片。');
+        return;
+    }
+    const payload = currentCopyPayload();
+    const workspace = scanData.workspace_id;
+    try {
+        const res = await workspaceFetch('/api/master_copy/preview', {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (requestId !== copyPreviewRequest || copyInProgress || workspace !== scanData?.workspace_id) return;
+        if (!data.ok) {
+            summaryBox.textContent = '無法取得寫入預覽'; previewContainer.replaceChildren();
+            copyPreviewMessage(data.error || '請檢查資料夾與設定後重試。', 'retry'); return;
+        }
+        const sum = data.summary;
+        const willApplyCnt = sum.will_create_count + sum.will_overwrite_count;
+        summaryBox.innerHTML = `<strong>新增 ${sum.will_create_count} · 覆蓋 ${sum.will_overwrite_count} · 略過 ${sum.will_skip_count}</strong>
+            <div class="muted-text">既有標記：${payload.overwrite ? '允許覆蓋（原檔會備份）' : '保留'}</div>
+            <details class="output-path"><summary>輸出：${escapeHtml(data.output_dir_name || scanData.folder_name)}</summary>
+                <div class="full-file-name">${escapeHtml(payload.output_dir || scanData.label_dir || scanData.image_dir || data.output_dir_name)}</div></details>`;
+        previewContainer.innerHTML = renderWritePreview(data.preview_items);
+        const blocking = data.blocking_reasons || [];
+        if (willApplyCnt > 0 && !blocking.length) {
+            validatedCopyPayload = {workspace, payload};
+            execBtn.disabled = false; execBtn.textContent = `建立 ${willApplyCnt} 份草稿`;
+            copyPreviewMessage(sum.will_overwrite_count ? '將覆蓋列出的既有標記，原檔會備份。' : '建立後請逐張確認框位。');
+        } else if (!payload.target_stems.length) {
+            copyPreviewMessage('請先選擇要套用的照片。');
+        } else if (!payload.overwrite && sum.will_skip_count === payload.target_stems.length && !willApplyCnt) {
+            copyPreviewMessage('已選照片都有標記，目前會全部保留。');
+        } else {
+            copyPreviewMessage(blocking.join('；').replaceAll('進階設定', '套用設定') || '沒有可建立的草稿，請檢查設定。');
+        }
+    } catch (e) {
+        if (requestId !== copyPreviewRequest || workspace !== scanData?.workspace_id) return;
+        previewContainer.replaceChildren();
+        copyPreviewMessage('預覽失敗，請重試。', 'retry');
+    }
+}
+
+async function runMasterCopyExecute() {
+    const button = document.getElementById('btnExecuteMasterCopy');
+    if (copyInProgress || button.disabled || !masterStem || copySelectedStems.size === 0) return;
+
+    const payload = currentCopyPayload();
+    if (!validatedCopyPayload || validatedCopyPayload.workspace !== scanData.workspace_id ||
+        JSON.stringify(validatedCopyPayload.payload) !== JSON.stringify(payload)) {
+        await runMasterCopyPreview();
+        return;
+    }
+    const targetStems = payload.target_stems;
+    const overwrite = payload.overwrite;
+    const outputDir = payload.output_dir;
+    const selectedClasses = payload.selected_classes;
+    validatedCopyPayload = null;
+
+    const workspace = scanData.workspace_id;
+    const banner = document.getElementById('applySuccessBanner');
+    const controls = document.querySelector('.apply-columns');
+    copyInProgress = true;
+    controls.inert = true;
+    banner.classList.remove('has-failures');
+    button.disabled = true;
+    button.textContent = '正在建立標記草稿…';
+    banner.style.display = 'flex';
+    banner.textContent = '正在寫入標記檔並建立備份…';
+    try {
+        const res = await workspaceFetch('/api/master_copy/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                master_stem: masterStem,
+                target_stems: targetStems,
+                overwrite,
+                output_dir: outputDir || null,
+                selected_classes: selectedClasses
+            })
+        });
+        const data = await res.json();
+        if (workspace !== scanData?.workspace_id) return;
+        if (!data.scan?.ok || !data.results) {
+            banner.classList.add('has-failures');
+            banner.textContent = data.error || '批次套用失敗，請重新掃描確認檔案狀態。';
+            return;
+        }
+
+        scanData = data.scan;
+        const result = data.results;
+        const processedStems = result.processed_stems || [];
+        const canReview = result.in_place && processedStems.length > 0;
+        if (canReview) {
+            presetReviewFilter('pending_review');
+            activeStem = processedStems[0];
+        }
+        processedStems.forEach(stem => copySelectedStems.delete(stem));
+
+        updateHeaderAndNavBadges();
+        renderLoadStepSummary();
+        renderCopyPhotoGrid();
+
+        banner.classList.toggle('has-failures', result.failed_count > 0);
+        const failures = (result.failed || []).map(item =>
+            `<li><strong>${escapeHtml(item.stem)}</strong> — ${escapeHtml(item.error)}</li>`
+        ).join('');
+        banner.innerHTML = `
+            <div>
+                <strong class="${result.failed_count ? 'text-amber' : 'text-green'}">
+                    ${result.failed_count ? '部分寫入失敗' : '批次套用完成'}
+                </strong>
+                <div>已寫入 ${result.success_count} 張 · 略過 ${result.skipped_count} 張 · 失敗 ${result.failed_count} 張</div>
+                <details><summary>輸出資料夾</summary><code id="copyResultPath">${escapeHtml(result.output_dir)}</code></details>
+                ${failures ? `<ul class="copy-failure-list">${failures}</ul><p>修正後可重試失敗項目。</p>` : ''}
+            </div>
+            ${canReview
+                ? `<button class="btn btn-primary" onclick="startReviewQueueNow()">檢查已寫入的 ${processedStems.length} 張</button>`
+                : `<button class="btn btn-secondary" onclick="openInExplorer('copyResultPath')">開啟輸出資料夾</button>`}
+        `;
+    } catch {
+        if (workspace === scanData?.workspace_id) {
+            banner.classList.add('has-failures');
+            banner.textContent = '執行時連線中斷。請重新掃描確認檔案狀態，再決定是否重試。';
+        }
+    } finally {
+        copyInProgress = false;
+        controls.inert = false;
+        if (currentStep === 'apply') runMasterCopyPreview();
+    }
+}
+
+function startReviewQueueNow() {
+    presetReviewFilter('pending_review');
+    switchStep('review');
+}
+
+// ============================================================================
+// 步驟 3：檢查與微調 (最大化畫布、佇列導向、明確儲存狀態與確認並下一張)
+// ============================================================================
+let appliedReviewSearch = '';
+function canChangeReviewSelection() {
+    if (isSavingCanvas || lastSaveFailed || reviewUpdatePending || dragAction) {
+        showToast('請先完成儲存；失敗時可點擊儲存狀態重試。', 'warn');
+        return false;
+    }
+    return true;
+}
+function refreshReviewSelection() {
+    const previous = activeStem;
+    ensureValidActiveItemForReview();
+    if (activeStem !== previous) { selectedBoxIndex = -1; dragAction = null; }
+    appliedReviewSearch = document.getElementById('searchInput').value;
+    renderStudioFileList();
+    renderInspectorAndCanvas();
+}
+function applyReviewSearch() {
+    if (!canChangeReviewSelection()) {
+        document.getElementById('searchInput').value = appliedReviewSearch;
+        return;
+    }
+    refreshReviewSelection();
+}
+function resetReviewFilters() {
+    if (!canChangeReviewSelection()) return;
+    document.getElementById('searchInput').value = '';
+    currentFilter = 'all';
+    document.querySelectorAll('#allScopeFilterChips .f-chip').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.filter === 'all');
+        btn.setAttribute('aria-pressed', String(btn.dataset.filter === 'all'));
+    });
+    setReviewScope('all');
+    document.getElementById('searchInput').focus();
+}
+function setReviewScope() {
+    // 已取消「本次佇列／全部項目」分類：清單一律顯示全部照片，改由快速篩選縮小範圍
+    if (!canChangeReviewSelection()) return;
+    reviewScope = 'all';
+    refreshReviewSelection();
+}
+
+function applyQuickFilter(filterName) {
+    if (!canChangeReviewSelection()) return;
+    currentFilter = filterName;
+    document.querySelectorAll('#allScopeFilterChips .f-chip').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.filter === filterName);
+        btn.setAttribute('aria-pressed', String(btn.dataset.filter === filterName));
+    });
+    refreshReviewSelection();
+}
+
+function getActiveReviewItemsList() {
+    if (!scanData || !scanData.items) return [];
+    const q = (document.getElementById('searchInput')?.value || '').trim().toLowerCase();
+
+    let list = scanData.items.filter(item => {
+        if (currentFilter === 'pending_review') return item.review_status === 'pending_review' || item.review_status === 'needs_fix';
+        if (currentFilter === 'unlabeled') return item.review_status === 'unlabeled';
+        if (currentFilter === 'confirmed') return item.review_status === 'confirmed';
+        return true;
+    });
+
+    if (q) {
+        list = list.filter(i =>
+            i.stem.toLowerCase().includes(q) ||
+            (i.image_name || '').toLowerCase().includes(q)
+        );
+    }
+    return list;
+}
+
+function ensureValidActiveItemForReview() {
+    if (!scanData || !scanData.items.length) { activeStem = null; return; }
+    reviewScope = 'all';
+    const list = getActiveReviewItemsList();
+    if (!list.length) activeStem = null;
+    else if (!activeStem || !list.some(i => i.stem === activeStem)) activeStem = list[0].stem;
+}
+
+function renderStudioFileList() {
+    if (!scanData || !scanData.ok) return;
+
+    const list = getActiveReviewItemsList();
+
+    const container = document.getElementById('studioFileList');
+    const focusedStem = document.activeElement?.dataset?.reviewStem;
+    if (list.length === 0) {
+        container.innerHTML = `
+            <div style="padding:16px;text-align:center;color:var(--text-muted);">
+                沒有符合的照片。<br>
+                <button class="btn-link" onclick="resetReviewFilters()">清除搜尋與篩選</button>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = list.map((item, idx) => {
+        const isAct = item.stem === activeStem;
+        const isRef = item.stem === masterStem;
+
+        let revBadge = `<span class="badge badge-warn">[!] 待確認</span>`;
+        if (item.review_status === 'confirmed') revBadge = `<span class="badge badge-ok">[✓] 已確認</span>`;
+        else if (item.review_status === 'needs_fix') revBadge = `<span class="badge badge-err">[!] 需修正</span>`;
+        else if (item.review_status === 'unlabeled') revBadge = `<span class="badge badge-info">未標記</span>`;
+
+        const fmtWarn = item.has_blocking_error
+            ? `<span class="text-red" style="font-weight:700;">[✕ ${escapeHtml(item.format_label)}]</span>`
+            : '';
+
+        return `
+            <button type="button" class="review-list-item ${isAct ? 'active' : ''} ${isRef ? 'is-reference' : ''}" data-review-stem="${escapeHtml(item.stem)}" aria-current="${isAct ? 'true' : 'false'}" onclick="selectReviewItem('${escapeJsStr(item.stem)}')">
+                <div class="r-item-top">
+                    <span class="r-item-name" title="${escapeHtml(item.image_name || item.stem)}">
+                        ${idx + 1}. ${escapeHtml(item.image_name || item.stem)}
+                    </span>
+                </div>
+                <div class="r-item-sub">${revBadge}${isRef ? '<span class="ref-badge">★ 參考照片</span>' : ''}<span>${item.box_count} 框</span></div>
+                ${fmtWarn ? `<div class="list-error">${fmtWarn}</div>` : ''}
+            </button>
+        `;
+    }).join('');
+    if (focusedStem) Array.from(container.querySelectorAll('[data-review-stem]')).find(el => el.dataset.reviewStem === focusedStem)?.focus();
+    container.querySelector('[aria-current="true"]')?.scrollIntoView({block: 'nearest'});
+}
+
+function selectReviewItem(stem) {
+    if (isSavingCanvas || lastSaveFailed || reviewUpdatePending) {
+        showToast('請等待標記儲存完成；若儲存失敗請先點擊重試。', 'warn');
+        return;
+    }
+    dragAction = null;
+    isDrawBoxMode = false;
+    canvasHoverPos = null;
+    activeStem = stem;
+    selectedBoxIndex = -1;
+    updateSaveIndicator('saved');
+    renderStudioFileList();
+    renderInspectorAndCanvas();
+    saveSessionProgress();
+}
+
+function readDisplayPreference(key, fallback) {
+    try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
+}
+function saveDisplayPreference(key, value) {
+    try { localStorage.setItem(key, value); } catch { /* Display preferences are optional. */ }
+}
+
+
+function updateReviewLayout() {
+    const workspace = document.getElementById('reviewWorkspace');
+    const sidebar = document.getElementById('reviewLeftSidebar');
+    if (!workspace || !sidebar || currentStep !== 'review') return;
+    const width = workspace.clientWidth;
+    const compact = width < 960;
+    workspace.classList.toggle('compact-review', compact);
+    workspace.classList.toggle('without-list', sidebar.classList.contains('collapsed'));
+    redrawCanvases();
+}
+
+function bindResizableSidebar({ handleId, sidebarId, cssVar, storageKey, isRightSide = false }) {
+    const handle = document.getElementById(handleId);
+    const sidebar = document.getElementById(sidebarId);
+    if (!handle || !sidebar) return;
+    let redrawFrame;
+    const saved = Number(readDisplayPreference(storageKey, '280'));
+    let requestedWidth = Number.isFinite(saved) ? Math.max(220, Math.min(520, saved)) : 280;
+    function applyWidth(persist = true) {
+        const limit = Math.max(220, Math.min(520, Math.floor(window.innerWidth * 0.42)));
+        const actual = Math.max(220, Math.min(limit, requestedWidth));
+        sidebar.style.setProperty(cssVar, actual + 'px');
+        handle.setAttribute('aria-valuemax', String(limit));
+        handle.setAttribute('aria-valuenow', String(actual));
+        handle.setAttribute('aria-valuetext', actual + ' 像素');
+        if (persist) {
+            requestedWidth = actual;
+            saveDisplayPreference(storageKey, String(actual));
+        }
+        cancelAnimationFrame(redrawFrame);
+        redrawFrame = requestAnimationFrame(updateReviewLayout);
+    }
+    window.addEventListener('resize', () => applyWidth(false));
+    handle.addEventListener('pointerdown', event => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        handle.focus();
+        handle.setPointerCapture(event.pointerId);
+    });
+    handle.addEventListener('pointermove', event => {
+        if (!handle.hasPointerCapture(event.pointerId)) return;
+        const rect = sidebar.getBoundingClientRect();
+        requestedWidth = isRightSide
+            ? Math.round(rect.right - event.clientX)
+            : Math.round(event.clientX - rect.left);
+        applyWidth();
+    });
+    const endDrag = event => {
+        if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+    };
+    handle.addEventListener('pointerup', endDrag);
+    handle.addEventListener('pointercancel', endDrag);
+    handle.addEventListener('keydown', event => {
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const current = Number(handle.getAttribute('aria-valuenow'));
+        const delta = isRightSide
+            ? (event.key === 'ArrowLeft' ? 20 : -20)
+            : (event.key === 'ArrowRight' ? 20 : -20);
+        requestedWidth = event.key === 'Home' ? 220 : event.key === 'End' ? 520 : current + delta;
+        applyWidth();
+    });
+    applyWidth(false);
+}
+
+function initPhotoListWidth() {
+    bindResizableSidebar({
+        handleId: 'photoListResize',
+        sidebarId: 'reviewLeftSidebar',
+        cssVar: '--photo-list-width',
+        storageKey: 'yolo.listWidth',
+        isRightSide: false
+    });
+    bindResizableSidebar({
+        handleId: 'boxListResize',
+        sidebarId: 'pinnedBoxesSidebar',
+        cssVar: '--box-list-width',
+        storageKey: 'yolo.boxListWidth',
+        isRightSide: true
+    });
+}
+
+function toggleReviewSidebar(side, button) {
+    const sidebar = document.getElementById(side === 'left' ? 'reviewLeftSidebar' : 'reviewRightSidebar');
+    const overlay = side === 'right' || window.matchMedia('(max-width: 900px)').matches;
+    if (overlay) sidebar.classList.remove('collapsed');
+    const visible = overlay ? sidebar.classList.toggle('expanded') : !sidebar.classList.toggle('collapsed');
+    const trigger = document.querySelector(`[aria-controls="${sidebar.id}"]`);
+    trigger?.setAttribute('aria-expanded', String(visible));
+    if (side === 'right' && visible) sidebar.querySelector('.close-review-sidebar')?.focus();
+    else if (button && button !== trigger) trigger?.focus();
+    setTimeout(updateReviewLayout, 50);
+}
+
+function updateSaveIndicator(state, message, retry) {
+    const el = document.getElementById('saveStatusIndicator');
+    if (!el) return;
+    el.className = `save-badge ${state}`;
+    el.onclick = null;
+    el.disabled = state !== 'error';
+    if (state === 'saved') {
+        el.textContent = message || '[✓] 已儲存';
+    } else if (state === 'saving') {
+        el.textContent = message || '[...] 儲存中';
+    } else if (state === 'error') {
+        el.textContent = message || '[✕] 儲存失敗（點擊重試）';
+        el.onclick = retry || (() => retryLastFailedSave());
+    }
+}
+
+function getReviewScopePhotos() {
+    return scanData.items.filter(item => item.has_image);
+}
+
+function renderInspectorAndCanvas() {
+    if (!scanData || !scanData.ok) return;
+    const item = scanData.items.find(i => i.stem === activeStem);
+    const list = getActiveReviewItemsList();
+    const s = scanData.summary;
+    if (!isSavingCanvas && !lastSaveFailed && !reviewUpdatePending) updateSaveIndicator('saved');
+
+    // 更新頂部進度與統計
+    const idxInList = list.findIndex(i => i.stem === activeStem);
+    document.getElementById('reviewQueueProgress').textContent = idxInList >= 0 ? `目前 ${idxInList + 1}／${list.length} 張` : '';
+    const photos = getReviewScopePhotos();
+    const count = status => photos.filter(photo => photo.review_status === status).length;
+    const scopeLabel = '全部照片';
+    document.getElementById('reviewCountsSummary').textContent =
+        `${scopeLabel} · 已確認 ${count('confirmed')}／${photos.length}` +
+        (count('needs_fix') ? ` · 需修正 ${count('needs_fix')}` : '');
+
+    // 檢查佇列是否全部確認完成
+    const completeBanner = document.getElementById('queueCompletedBanner');
+    if (photos.length && photos.every(photo => photo.review_status === 'confirmed')) {
+        completeBanner.style.display = 'flex';
+        const remaining = scanData.items.filter(photo => photo.has_image && photo.review_status !== 'confirmed');
+        const needsFix = remaining.filter(photo => photo.review_status === 'needs_fix').length;
+        completeBanner.innerHTML = `<strong>${scopeLabel}已確認完成</strong>
+            <span>${remaining.length ? `專案尚有 ${remaining.length} 張未完成${needsFix ? `（${needsFix} 張需修正）` : ''}` : '全部照片已確認'}</span>
+            ${remaining.length ? '<button class="btn btn-secondary" onclick="reviewRemainingPhotos()">檢查其餘照片</button>' : ''}`;
+    } else completeBanner.style.display = 'none';
+
+    document.getElementById('reviewEmptyState').hidden = !!item;
+    document.getElementById('canvasViewport').hidden = !item;
+    if (!item) {
+        selectedBoxIndex = -1;
+        canvasRenderState = null;
+        document.getElementById('btnConfirmAndNext').disabled = true;
+        document.getElementById('btnConfirmAndNext').textContent = '尚未選取照片';
+        document.getElementById('btnConfirmAndNext').title = '請先選取照片';
+        document.getElementById('saveStatusIndicator').hidden = true;
+        document.getElementById('reviewQueueProgress').textContent = '符合 0 張';
+        document.getElementById('itemMetaDetails').textContent = '';
+        document.getElementById('itemIssuesList').textContent = '';
+        document.getElementById('targetCanvasCaption').textContent = '';
+        loadImagesAndDrawCanvas(null);
+            document.getElementById('reviewCurrentFileName').title = '';
+        document.getElementById('reviewCurrentFileName').textContent = '沒有符合的照片';
+        document.getElementById('inspectorBoxCount').textContent = '0';
+        document.getElementById('itemBoxesList').textContent = '尚未選取照片';
+        document.getElementById('btnDeleteSelectedBox').style.display = 'none';
+        return;
+    }
+
+    document.getElementById('saveStatusIndicator').hidden = false;
+    const fileTitle = document.getElementById('reviewCurrentFileName');
+    fileTitle.textContent = item.image_name || item.label_name || item.stem;
+    fileTitle.title = fileTitle.textContent;
+    const isCurrentRef = item.stem === masterStem;
+    document.getElementById('reviewRefBadge').hidden = !isCurrentRef;
+    const setMasterBtn = document.getElementById('btnSetMaster');
+    if (setMasterBtn) {
+        setMasterBtn.classList.toggle('is-current-ref', isCurrentRef);
+        setMasterBtn.setAttribute('aria-pressed', String(isCurrentRef));
+        setMasterBtn.textContent = isCurrentRef ? '★ 已設為參考' : '設為參考';
+    }
+    document.getElementById('targetCanvasCaption').textContent =
+        `${item.review_label}`;
+
+    // 底部主要按鈕文案：若為 0 框照片，明確提示「確認為無物件照片並下一張 (C)」
+    const confirmBtn = document.getElementById('btnConfirmAndNext');
+    confirmBtn.hidden = item.box_count === 0;
+    confirmBtn.style.display = item.box_count === 0 ? 'none' : '';
+    confirmBtn.disabled = !!item.has_blocking_error || item.review_status === 'confirmed';
+    const hasNext = list.some(photo => photo.stem !== item.stem && photo.review_status !== 'confirmed');
+    if (item.review_status === 'confirmed') {
+        confirmBtn.textContent = '已確認';
+    } else if (item.has_blocking_error) {
+        confirmBtn.textContent = '請先修正格式';
+    } else if (item.box_count === 0) {
+        confirmBtn.textContent = '';
+    } else {
+        confirmBtn.textContent = hasNext ? '確認並下一張 (C)' : '確認並完成 (C)';
+    }
+
+    confirmBtn.title = confirmBtn.textContent;
+
+    // 右側照片狀態詳情
+    const metaEl = document.getElementById('itemMetaDetails');
+    metaEl.innerHTML = `
+        <div class="meta-kv"><span class="muted-text">檔案名稱</span><strong>${escapeHtml(item.image_name || item.label_name)}</strong></div>
+        <div class="meta-kv"><span class="muted-text">人工審核狀態</span><strong>${escapeHtml(item.review_label)}</strong></div>
+        <div class="meta-kv"><span class="muted-text">格式檢查狀態</span><strong>${escapeHtml(item.format_label)}</strong></div>
+        <div class="meta-kv"><span class="muted-text">影像解析度</span><span>${item.img_width} × ${item.img_height}</span></div>
+        <div class="meta-kv"><span class="muted-text">參考照片來源</span><span>${escapeHtml(item.source_master || '原始標記 / 非複製')}</span></div>
+    `;
+
+    // 右側診斷訊息
+    const issuesEl = document.getElementById('itemIssuesList');
+    if (!item.issues || item.issues.length === 0) {
+        issuesEl.innerHTML = `
+            <div style="color:var(--status-green);font-weight:600;">
+                [✓] 格式與座標檢查正常（共 ${item.box_count} 個標記框）
+            </div>
+        `;
+    } else {
+        issuesEl.innerHTML = item.issues.map(iss => {
+            const cls = iss.level === 'error' ? 'text-red' : (iss.level === 'warning' ? 'text-amber' : 'text-blue');
+            const sym = iss.level === 'error' ? '[✕ 錯誤]' : (iss.level === 'warning' ? '[! 提醒]' : '[資訊]');
+            return `<div class="${cls}"><strong>${sym}</strong> ${escapeHtml(iss.message)}</div>`;
+        }).join('');
+    }
+
+    // 右側標記框清單與新增／複製工具列
+    if (!Array.isArray(item.boxes)) item.boxes = [];
+    document.getElementById('inspectorBoxCount').textContent = item.boxes.length;
+    const availClasses = getAvailableCanvasClasses();
+    if (!availClasses.some(c => c.id === defaultDrawClassId) && availClasses.length > 0) {
+        defaultDrawClassId = availClasses[0].id;
+    }
+    const drawBtn = document.getElementById('btnToggleDrawBox');
+    if (drawBtn) {
+        drawBtn.classList.toggle('active', isDrawBoxMode);
+        drawBtn.setAttribute('aria-pressed', String(isDrawBoxMode));
+        drawBtn.textContent = isDrawBoxMode ? '✕ 取消新增 (Esc)' : '＋ 新增框 (W)';
+    }
+    const tCanvasEl = document.getElementById('targetCanvas');
+    const mainWrapEl = document.getElementById('mainCanvasWrapper');
+    if (tCanvasEl) {
+        tCanvasEl.style.cursor = isDrawBoxMode
+            ? 'crosshair'
+            : (isCanvasZoomedOrScrollable(mainWrapEl) && selectedBoxIndex < 0 ? 'grab' : 'default');
+    }
+    const hasSelectedBox = (selectedBoxIndex >= 0 && selectedBoxIndex < item.boxes.length);
+    const dupBtn = document.getElementById('btnDuplicateSelectedBox');
+    if (dupBtn) {
+        dupBtn.style.display = hasSelectedBox ? 'inline-flex' : 'none';
+    }
+    const delBtn = document.getElementById('btnDeleteSelectedBox');
+    if (delBtn) {
+        delBtn.style.display = hasSelectedBox ? 'inline-flex' : 'none';
+    }
+
+    const boxesEl = document.getElementById('itemBoxesList');
+    if (item.boxes.length === 0) {
+        boxesEl.innerHTML = `<div class="muted-text">沒有標記框（可點上方「＋ 新增框 (W)」直接在畫布拉框）。</div>`;
+    } else {
+        boxesEl.innerHTML = item.boxes.map((b, idx) => {
+            const color = CLASS_COLORS[b.class_id % CLASS_COLORS.length];
+            const isSel = idx === selectedBoxIndex;
+            const inlineClsSelect = isSel
+                ? `<select class="form-select-sm box-inline-class-select" aria-label="變更標記框類別" onclick="event.stopPropagation()" onchange="changeSelectedBoxClass(${idx}, this.value)">
+                    ${availClasses.map(c => `<option value="${c.id}" ${c.id === Number(b.class_id) ? 'selected' : ''}>[${c.id}] ${escapeHtml(c.name)}</option>`).join('')}
+                    <option value="__new__">＋ 新增類別...</option>
+                   </select>`
+                : '';
+            return `
+                <div role="button" tabindex="0" class="box-row-item ${isSel ? 'selected' : ''}" aria-pressed="${isSel}" onclick="selectBoxFromList(${idx})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectBoxFromList(${idx});}">
+                    <div class="box-row-main">
+                        <span>
+                            <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${color};margin-right:5px;"></span>
+                            ${idx + 1} · ${escapeHtml(b.class_name)}
+                        </span>
+                        ${inlineClsSelect}
+                    </div>
+                    ${isSel ? `<div class="box-properties">類別 ID ${b.class_id} · 寬 ${(b.w * 100).toFixed(1)}%／高 ${(b.h * 100).toFixed(1)}%（影像比例）</div>` : ''}
+                </div>
+            `;
+        }).join('');
+    }
+
+    loadImagesAndDrawCanvas(item);
+}
+
+function getDefinedClassesList() {
+    const classEntries = [];
+    if (scanData?.classes && typeof scanData.classes === 'object') {
+        Object.keys(scanData.classes)
+            .map(k => parseInt(k, 10))
+            .filter(k => Number.isFinite(k))
+            .sort((a, b) => a - b)
+            .forEach(cid => {
+                classEntries.push({ id: cid, name: String(scanData.classes[cid] || `class_${cid}`) });
+            });
+    }
+    return classEntries;
+}
+
+function getAvailableCanvasClasses() {
+    const classEntries = getDefinedClassesList();
+    if (!classEntries.length && Array.isArray(scanData?.items)) {
+        const seen = new Map();
+        scanData.items.forEach(it => {
+            (it.boxes || []).forEach(b => {
+                const cid = Number(b.class_id);
+                if (Number.isFinite(cid) && !seen.has(cid)) {
+                    seen.set(cid, String(b.class_name || `class_${cid}`));
+                }
+            });
+        });
+        Array.from(seen.keys()).sort((a, b) => a - b).forEach(cid => {
+            classEntries.push({ id: cid, name: seen.get(cid) });
+        });
+    }
+    if (!classEntries.length) {
+        classEntries.push({ id: 0, name: 'class_0' });
+    }
+    return classEntries;
+}
+
+function openNewBoxClassModal(editBoxIdx = -1) {
+    pendingClassEditBoxIdx = editBoxIdx;
+    const inputEl = document.getElementById('inputNewBoxClassName');
+    if (inputEl) inputEl.value = '';
+
+    const defined = getDefinedClassesList();
+    const wrapEl = document.getElementById('existingClassesQuickWrap');
+    const listEl = document.getElementById('existingClassesQuickList');
+    if (wrapEl && listEl) {
+        if (defined.length > 0) {
+            wrapEl.style.display = 'flex';
+            listEl.innerHTML = defined.map(c =>
+                `<button type="button" class="btn-xs existing-cls-chip" onclick="selectExistingClassInModal('${escapeJsStr(c.name)}')">[${c.id}] ${escapeHtml(c.name)}</button>`
+            ).join('');
+        } else {
+            wrapEl.style.display = 'none';
+            listEl.innerHTML = '';
+        }
+    }
+
+    updateNewBoxClassPreview();
+    openModal('newBoxClassModal');
+    setTimeout(() => {
+        inputEl?.focus();
+    }, 20);
+}
+
+function updateNewBoxClassPreview() {
+    const previewEl = document.getElementById('newBoxClassIdPreview');
+    const inputEl = document.getElementById('inputNewBoxClassName');
+    if (!previewEl || !inputEl) return;
+
+    const val = inputEl.value.trim();
+    const defined = getDefinedClassesList();
+    const nextId = defined.length > 0 ? Math.max(...defined.map(c => c.id)) + 1 : 0;
+    const matched = defined.find(c => c.name === val);
+
+    if (matched) {
+        previewEl.textContent = `將使用既有類別 ID #${matched.id}：「${matched.name}」`;
+    } else if (val) {
+        previewEl.textContent = `將新增為新類別 ID #${nextId}：「${val}」（並自動追加至 classes.txt）`;
+    } else {
+        previewEl.textContent = `將建立新類別 ID #${nextId}（輸入名稱後自動追加至 classes.txt）`;
+    }
+}
+
+function selectExistingClassInModal(clsName) {
+    const inputEl = document.getElementById('inputNewBoxClassName');
+    if (inputEl) {
+        inputEl.value = clsName;
+        updateNewBoxClassPreview();
+    }
+    confirmNewBoxClassModal();
+}
+
+function handleNewBoxClassInputKey(e) {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        confirmNewBoxClassModal();
+    } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        cancelNewBoxClassModal();
+    }
+}
+
+function cancelNewBoxClassModal() {
+    pendingNewBox = null;
+    pendingClassEditBoxIdx = -1;
+    closeModal('newBoxClassModal');
+    renderInspectorAndCanvas();
+}
+
+async function confirmNewBoxClassModal() {
+    const inputEl = document.getElementById('inputNewBoxClassName');
+    const rawName = (inputEl?.value || '').trim();
+    if (!rawName) {
+        showToast('請輸入新增標記框的類別名稱', 'warn');
+        inputEl?.focus();
+        return;
+    }
+
+    const item = scanData?.items?.find(i => i.stem === activeStem);
+    if (!item) {
+        cancelNewBoxClassModal();
+        return;
+    }
+
+    const defined = getDefinedClassesList();
+    const matched = defined.find(c => c.name === rawName);
+    let targetId;
+    let targetName;
+    if (matched) {
+        targetId = matched.id;
+        targetName = matched.name;
+    } else {
+        targetId = defined.length > 0 ? Math.max(...defined.map(c => c.id)) + 1 : 0;
+        targetName = rawName;
+        if (!Array.isArray(scanData.classes)) {
+            scanData.classes = [];
+        }
+        scanData.classes[targetId] = targetName;
+    }
+
+    if (!Array.isArray(item.boxes)) item.boxes = [];
+    if (pendingClassEditBoxIdx >= 0 && pendingClassEditBoxIdx < item.boxes.length) {
+        item.boxes[pendingClassEditBoxIdx].class_id = targetId;
+        item.boxes[pendingClassEditBoxIdx].class_name = targetName;
+        selectedBoxIndex = pendingClassEditBoxIdx;
+    } else if (pendingNewBox) {
+        item.boxes.push({
+            class_id: targetId,
+            class_name: targetName,
+            xc: pendingNewBox.xc,
+            yc: pendingNewBox.yc,
+            w: pendingNewBox.w,
+            h: pendingNewBox.h
+        });
+        selectedBoxIndex = item.boxes.length - 1;
+    } else {
+        cancelNewBoxClassModal();
+        return;
+    }
+
+    defaultDrawClassId = targetId;
+    pendingNewBox = null;
+    pendingClassEditBoxIdx = -1;
+    closeModal('newBoxClassModal');
+    await saveCanvasBoxesToDisk(item.stem, item.boxes);
+}
+
+function toggleDrawBoxMode(forceState) {
+    const item = scanData?.items?.find(i => i.stem === activeStem);
+    if (!item || !item.has_image) return;
+    isDrawBoxMode = typeof forceState === 'boolean' ? forceState : !isDrawBoxMode;
+    if (!isDrawBoxMode) {
+        canvasHoverPos = null;
+        if (dragAction?.mode === 'create') dragAction = null;
+    }
+    renderInspectorAndCanvas();
+}
+
+async function duplicateSelectedBoxOnCanvas() {
+    const item = scanData?.items?.find(i => i.stem === activeStem);
+    if (isSavingCanvas || lastSaveFailed || reviewUpdatePending || !item || !Array.isArray(item.boxes)) return;
+    if (selectedBoxIndex < 0 || selectedBoxIndex >= item.boxes.length) {
+        showToast('請先點選要複製的標記框', 'info');
+        return;
+    }
+    const src = item.boxes[selectedBoxIndex];
+    const stepX = (src.xc + src.w / 2 + 0.025 <= 1) ? 0.025 : -0.025;
+    const stepY = (src.yc + src.h / 2 + 0.025 <= 1) ? 0.025 : -0.025;
+    const newBox = {
+        class_id: src.class_id,
+        class_name: src.class_name,
+        xc: Math.max(src.w / 2, Math.min(1 - src.w / 2, src.xc + stepX)),
+        yc: Math.max(src.h / 2, Math.min(1 - src.h / 2, src.yc + stepY)),
+        w: src.w,
+        h: src.h
+    };
+    item.boxes.push(newBox);
+    selectedBoxIndex = item.boxes.length - 1;
+    isDrawBoxMode = false;
+    await saveCanvasBoxesToDisk(item.stem, item.boxes);
+}
+
+async function changeSelectedBoxClass(boxIdx, newCidVal) {
+    const item = scanData?.items?.find(i => i.stem === activeStem);
+    if (isSavingCanvas || lastSaveFailed || reviewUpdatePending || !item || !Array.isArray(item.boxes)) return;
+    if (newCidVal === '__new__') {
+        openNewBoxClassModal(boxIdx);
+        renderInspectorAndCanvas();
+        return;
+    }
+    const b = item.boxes[boxIdx];
+    const newCid = parseInt(newCidVal, 10);
+    if (!b || !Number.isFinite(newCid) || Number(b.class_id) === newCid) return;
+    const avail = getAvailableCanvasClasses();
+    const found = avail.find(c => c.id === newCid);
+    b.class_id = newCid;
+    b.class_name = found ? found.name : `class_${newCid}`;
+    defaultDrawClassId = newCid;
+    await saveCanvasBoxesToDisk(item.stem, item.boxes);
+}
+
+function reviewRemainingPhotos() {
+    const remaining = scanData.items.filter(photo => photo.has_image && photo.review_status !== 'confirmed');
+    if (!remaining.length) return;
+    presetReviewFilter('pending_review');
+    activeStem = remaining[0].stem;
+    refreshReviewSelection();
+    updateSaveIndicator('saved');
+    saveSessionProgress();
+}
+
+function isCanvasZoomedOrScrollable(wrapper) {
+    if (zoomMultiplier > 1.001) return true;
+    if (!wrapper) return false;
+    return (wrapper.scrollWidth > wrapper.clientWidth + 2) || (wrapper.scrollHeight > wrapper.clientHeight + 2);
+}
+
+function selectBoxFromList(idx) {
+    selectedBoxIndex = idx;
+    const item = scanData?.items?.find(i => i.stem === activeStem);
+    if (item && item.boxes && item.boxes[idx]) {
+        defaultDrawClassId = Number(item.boxes[idx].class_id);
+    }
+    renderInspectorAndCanvas();
+    const wrapper = document.getElementById('mainCanvasWrapper');
+    if (wrapper && canvasRenderState && item?.boxes?.[idx] && isCanvasZoomedOrScrollable(wrapper)) {
+        const b = item.boxes[idx];
+        const targetX = b.xc * canvasRenderState.drawW - wrapper.clientWidth / 2;
+        const targetY = b.yc * canvasRenderState.drawH - wrapper.clientHeight / 2;
+        wrapper.scrollLeft = Math.max(0, Math.round(targetX));
+        wrapper.scrollTop = Math.max(0, Math.round(targetY));
+    }
+}
+
+// ============================================================================
+// 畫布繪製與直接拖曳微調標記框 (保持照片正確比例，不拉伸變形)
+// ============================================================================
+function setPreviewMode(mode) {
+    mode = mode === 'side_by_side' ? 'side_by_side' : 'single';
+    previewMode = mode;
+    document.getElementById('targetCanvasRole').textContent = mode === 'side_by_side' ? '右側 · 目前照片' : '目前照片';
+    document.querySelectorAll('.cmp-btn').forEach(btn => {
+        const active = btn.dataset.vmode === mode;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', String(active));
+    });
+    document.getElementById('masterCanvasPane').style.display = mode === 'side_by_side' ? 'flex' : 'none';
+    redrawCanvases();
+}
+
+function updateOverlayAlpha(val) {
+    overlayAlpha = parseInt(val, 10) / 100;
+    document.getElementById('overlayAlphaVal').textContent = `${val}%`;
+    redrawCanvases();
+}
+
+function adjustZoom(factor) {
+    const wrapper = document.getElementById('mainCanvasWrapper');
+    const prevDrawW = canvasRenderState?.drawW || 0;
+    const prevDrawH = canvasRenderState?.drawH || 0;
+    let centerRatioX = 0.5;
+    let centerRatioY = 0.5;
+    if (wrapper && prevDrawW > wrapper.clientWidth && prevDrawW > 0) {
+        centerRatioX = (wrapper.scrollLeft + wrapper.clientWidth / 2) / prevDrawW;
+    }
+    if (wrapper && prevDrawH > wrapper.clientHeight && prevDrawH > 0) {
+        centerRatioY = (wrapper.scrollTop + wrapper.clientHeight / 2) / prevDrawH;
+    }
+
+    zoomMultiplier = Math.max(0.5, Math.min(4.0, zoomMultiplier * factor));
+    document.getElementById('zoomLevelText').textContent = `${Math.round(zoomMultiplier * 100)}%`;
+    if (zoomMultiplier > 1.001) {
+        selectedBoxIndex = -1;
+    }
+    redrawCanvases();
+
+    if (wrapper && canvasRenderState) {
+        const { drawW, drawH } = canvasRenderState;
+        wrapper.scrollLeft = Math.max(0, Math.round(centerRatioX * drawW - wrapper.clientWidth / 2));
+        wrapper.scrollTop = Math.max(0, Math.round(centerRatioY * drawH - wrapper.clientHeight / 2));
+    }
+    const masterWrapper = document.getElementById('masterCanvasWrapper');
+    const masterCanvas = document.getElementById('masterCanvas');
+    if (masterWrapper && masterCanvas && !masterCanvas.hidden && previewMode === 'side_by_side') {
+        masterWrapper.scrollLeft = Math.max(0, Math.round(centerRatioX * masterCanvas.width - masterWrapper.clientWidth / 2));
+        masterWrapper.scrollTop = Math.max(0, Math.round(centerRatioY * masterCanvas.height - masterWrapper.clientHeight / 2));
+    }
+    const tCanvasEl = document.getElementById('targetCanvas');
+    if (tCanvasEl && !isDrawBoxMode) {
+        tCanvasEl.style.cursor = isCanvasZoomedOrScrollable(wrapper) ? 'grab' : 'default';
+    }
+}
+
+function resetZoom() {
+    zoomMultiplier = 1.0;
+    document.getElementById('zoomLevelText').textContent = '適應視窗';
+    redrawCanvases();
+    const wrapper = document.getElementById('mainCanvasWrapper');
+    if (wrapper) {
+        wrapper.scrollLeft = 0;
+        wrapper.scrollTop = 0;
+    }
+    const masterWrapper = document.getElementById('masterCanvasWrapper');
+    if (masterWrapper) {
+        masterWrapper.scrollLeft = 0;
+        masterWrapper.scrollTop = 0;
+    }
+    const tCanvasEl = document.getElementById('targetCanvas');
+    if (tCanvasEl && !isDrawBoxMode) {
+        tCanvasEl.style.cursor = 'default';
+    }
+}
+
+let comparisonChoiceStem = null;
+let comparisonChoiceWorkspace = null;
+function getComparisonReference(item) {
+    return scanData.items.find(photo => photo.has_image && photo.is_valid_reference && photo.stem === masterStem) || null;
+}
+
+function renderComparisonPicker() {}
+
+let comparisonReference = null;
+let comparisonLoadFailed = false;
+let canvasImageRequest = 0;
+let loadedTargetImgKey = '';
+let loadedMasterImgKey = '';
+function loadImagesAndDrawCanvas(item) {
+    comparisonReference = item?.has_image ? getComparisonReference(item) : null;
+    renderComparisonPicker(item);
+    if (!item || !item.has_image) {
+        canvasImageRequest++;
+        targetImgObj = null;
+        masterImgObj = null;
+        loadedTargetImgKey = '';
+        loadedMasterImgKey = '';
+        comparisonLoadFailed = false;
+        redrawCanvases();
+        return;
+    }
+
+    const wsId = scanData?.workspace_id || '';
+    const nextTargetKey = `${wsId}::${item.stem}`;
+    const nextMasterKey = comparisonReference ? `${wsId}::${comparisonReference.stem}` : '';
+
+    if (targetImgObj && loadedTargetImgKey === nextTargetKey) {
+        if (!comparisonReference) {
+            masterImgObj = null;
+            loadedMasterImgKey = '';
+            comparisonLoadFailed = false;
+            redrawCanvases();
+            return;
+        }
+        if (masterImgObj && loadedMasterImgKey === nextMasterKey) {
+            redrawCanvases();
+            return;
+        }
+    }
+
+    const requestId = ++canvasImageRequest;
+    if (loadedTargetImgKey !== nextTargetKey) {
+        targetImgObj = null;
+        loadedTargetImgKey = '';
+    }
+    if (loadedMasterImgKey !== nextMasterKey) {
+        masterImgObj = null;
+        loadedMasterImgKey = '';
+        comparisonLoadFailed = false;
+    }
+    redrawCanvases();
+
+    const loadMasterIfNeeded = () => {
+        if (!comparisonReference) return;
+        if (masterImgObj && loadedMasterImgKey === nextMasterKey) {
+            redrawCanvases();
+            return;
+        }
+        const mImg = new Image();
+        mImg.onload = () => {
+            if (requestId !== canvasImageRequest) return;
+            masterImgObj = mImg;
+            loadedMasterImgKey = nextMasterKey;
+            redrawCanvases();
+        };
+        mImg.onerror = () => {
+            if (requestId !== canvasImageRequest) return;
+            comparisonLoadFailed = true;
+            redrawCanvases();
+        };
+        mImg.src = workspaceImage(comparisonReference.stem);
+    };
+
+    if (targetImgObj && loadedTargetImgKey === nextTargetKey) {
+        loadMasterIfNeeded();
+        return;
+    }
+
+    const tImg = new Image();
+    tImg.onload = () => {
+        if (requestId !== canvasImageRequest) return;
+        targetImgObj = tImg;
+        loadedTargetImgKey = nextTargetKey;
+        redrawCanvases();
+        loadMasterIfNeeded();
+    };
+    tImg.onerror = () => {
+        if (requestId !== canvasImageRequest) return;
+        targetImgObj = null;
+        loadedTargetImgKey = '';
+        redrawCanvases();
+        showToast("照片載入失敗，請重新掃描資料夾", "error");
+    };
+    tImg.src = `${workspaceImage(item.stem)}`;
+}
+
+function redrawCanvases() {
+    const tCanvas = document.getElementById('targetCanvas');
+    const wrapper = document.getElementById('mainCanvasWrapper');
+    if (!tCanvas || !wrapper) return;
+    const ctx = tCanvas.getContext('2d');
+    const referenceName = comparisonReference?.image_name || comparisonReference?.stem;
+    const referenceStatus = !comparisonReference ? '沒有其他可比較照片'
+        : comparisonLoadFailed ? '參考照片載入失敗'
+        : masterImgObj ? referenceName : '正在載入參考照片…';
+    const masterCaption = document.getElementById('masterCanvasCaption');
+    masterCaption.textContent = referenceStatus;
+    masterCaption.title = referenceStatus;
+    const comparisonStatus = document.getElementById('comparisonStatus');
+    comparisonStatus.textContent = previewMode === 'overlay' ? '比較：' + referenceStatus : '';
+    comparisonStatus.title = comparisonStatus.textContent;
+    const masterCanvas = document.getElementById('masterCanvas');
+    masterCanvas.hidden = !masterImgObj;
+
+    const item = scanData?.items?.find(i => i.stem === activeStem);
+    if (!item || !targetImgObj) {
+        if (tCanvas.width !== 480) tCanvas.width = 480;
+        if (tCanvas.height !== 320) tCanvas.height = 320;
+        tCanvas.style.width = '480px';
+        tCanvas.style.height = '320px';
+        ctx.fillStyle = '#12191F';
+        ctx.fillRect(0, 0, tCanvas.width, tCanvas.height);
+        ctx.fillStyle = '#94A3B8';
+        ctx.font = '16px "Microsoft JhengHei", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('無可顯示的照片影像', tCanvas.width / 2, tCanvas.height / 2);
+        return;
+    }
+
+    // 計算等比例縮放，確保完全適應視窗且絕不變形（使用 offsetWidth/offsetHeight 避免捲軸出現時基準抖動）
+    const availW = Math.max(1, (wrapper.offsetWidth || wrapper.clientWidth) - 20);
+    const availH = Math.max(1, (wrapper.offsetHeight || wrapper.clientHeight) - 24);
+    const imgW = targetImgObj.naturalWidth || item.img_width || 640;
+    const imgH = targetImgObj.naturalHeight || item.img_height || 480;
+
+    const baseScale = Math.min(availW / imgW, availH / imgH);
+    const finalScale = baseScale * zoomMultiplier;
+
+    const drawW = Math.max(1, Math.round(imgW * finalScale));
+    const drawH = Math.max(1, Math.round(imgH * finalScale));
+
+    if (tCanvas.width !== drawW) tCanvas.width = drawW;
+    if (tCanvas.height !== drawH) tCanvas.height = drawH;
+    tCanvas.style.width = `${drawW}px`;
+    tCanvas.style.height = `${drawH}px`;
+    canvasRenderState = { drawW, drawH, imgW, imgH, scale: finalScale };
+
+    ctx.clearRect(0, 0, drawW, drawH);
+    ctx.drawImage(targetImgObj, 0, 0, drawW, drawH);
+
+    // 若為半透明疊圖模式，疊加參考照片
+    if (previewMode === 'overlay' && masterImgObj) {
+        ctx.save();
+        ctx.globalAlpha = overlayAlpha;
+        ctx.drawImage(masterImgObj, 0, 0, drawW, drawH);
+        ctx.restore();
+    }
+
+    // 繪製標記框
+    const showBoxes = true;
+    if (showBoxes && item.boxes && item.boxes.length > 0) {
+        drawBoxesOnContext(ctx, item.boxes, drawW, drawH, selectedBoxIndex);
+    }
+
+    // 新增標記框模式的十字輔助線與即時拉框預覽
+    if (pendingNewBox) {
+        const bw = pendingNewBox.w * drawW;
+        const bh = pendingNewBox.h * drawH;
+        const bx = pendingNewBox.xc * drawW - bw / 2;
+        const by = pendingNewBox.yc * drawH - bh / 2;
+        ctx.save();
+        ctx.strokeStyle = '#F08A4C';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(bx, by, bw, bh);
+        ctx.fillStyle = 'rgba(240, 138, 76, 0.24)';
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.restore();
+    } else if (isDrawBoxMode) {
+        if (dragAction && dragAction.mode === 'create') {
+            const rx = Math.min(dragAction.startX, dragAction.curX);
+            const ry = Math.min(dragAction.startY, dragAction.curY);
+            const rw = Math.abs(dragAction.curX - dragAction.startX);
+            const rh = Math.abs(dragAction.curY - dragAction.startY);
+            ctx.save();
+            ctx.strokeStyle = '#F08A4C';
+            ctx.lineWidth = 2.5;
+            ctx.setLineDash([6, 4]);
+            ctx.strokeRect(rx, ry, rw, rh);
+            ctx.fillStyle = 'rgba(240, 138, 76, 0.22)';
+            ctx.fillRect(rx, ry, rw, rh);
+            ctx.restore();
+        } else if (canvasHoverPos) {
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(canvasHoverPos.x, 0);
+            ctx.lineTo(canvasHoverPos.x, drawH);
+            ctx.moveTo(0, canvasHoverPos.y);
+            ctx.lineTo(drawW, canvasHoverPos.y);
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+
+    // 並排比較模式：繪製左側參考照片畫布
+    if (previewMode === 'side_by_side') {
+        const mCanvas = masterCanvas;
+        const mItem = comparisonReference;
+        if (masterImgObj && mItem) {
+            const referenceWrapper = document.getElementById('masterCanvasWrapper');
+            const width = masterImgObj.naturalWidth;
+            const height = masterImgObj.naturalHeight;
+            const scale = Math.min(
+                Math.max(1, (referenceWrapper.offsetWidth || referenceWrapper.clientWidth) - 20) / width,
+                Math.max(1, (referenceWrapper.offsetHeight || referenceWrapper.clientHeight) - 20) / height
+            ) * zoomMultiplier;
+            const mDrawW = Math.max(1, Math.round(width * scale));
+            const mDrawH = Math.max(1, Math.round(height * scale));
+            if (mCanvas.width !== mDrawW) mCanvas.width = mDrawW;
+            if (mCanvas.height !== mDrawH) mCanvas.height = mDrawH;
+            mCanvas.style.width = `${mDrawW}px`;
+            mCanvas.style.height = `${mDrawH}px`;
+            const mCtx = mCanvas.getContext('2d');
+            mCtx.clearRect(0, 0, mDrawW, mDrawH);
+            mCtx.drawImage(masterImgObj, 0, 0, mDrawW, mDrawH);
+            if (showBoxes && mItem.boxes) {
+                drawBoxesOnContext(mCtx, mItem.boxes, mDrawW, mDrawH, -1);
+            }
+        }
+    }
+}
+
+function getBoxResizeHandles(bx, by, bw, bh) {
+    const handles = [
+        { name: 'tl', x: bx, y: by, cursor: 'nwse-resize' },
+        { name: 'tr', x: bx + bw, y: by, cursor: 'nesw-resize' },
+        { name: 'bl', x: bx, y: by + bh, cursor: 'nesw-resize' },
+        { name: 'br', x: bx + bw, y: by + bh, cursor: 'nwse-resize' }
+    ];
+    if (bw >= 24) {
+        handles.push(
+            { name: 'tc', x: bx + bw / 2, y: by, cursor: 'ns-resize' },
+            { name: 'bc', x: bx + bw / 2, y: by + bh, cursor: 'ns-resize' }
+        );
+    }
+    if (bh >= 24) {
+        handles.push(
+            { name: 'ml', x: bx, y: by + bh / 2, cursor: 'ew-resize' },
+            { name: 'mr', x: bx + bw, y: by + bh / 2, cursor: 'ew-resize' }
+        );
+    }
+    return handles;
+}
+
+function drawBoxesOnContext(ctx, boxes, W, H, highlightIdx) {
+    boxes.forEach((b, idx) => {
+        const bw = b.w * W;
+        const bh = b.h * H;
+        const bx = (b.xc * W) - (bw / 2);
+        const by = (b.yc * H) - (bh / 2);
+        const isSel = idx === highlightIdx;
+        const color = isSel ? '#F08A4C' : CLASS_COLORS[b.class_id % CLASS_COLORS.length];
+
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = isSel ? 3 : 2;
+        ctx.strokeRect(bx, by, bw, bh);
+
+        ctx.fillStyle = color;
+        ctx.globalAlpha = isSel ? 0.24 : 0.12;
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.restore();
+
+        // 標籤文字背景
+        const labelStr = `#${idx + 1} ${b.class_name}`;
+        ctx.font = 'bold 17px "Microsoft JhengHei", sans-serif';
+        const textW = ctx.measureText(labelStr).width + 10;
+        const labelHeight = 25;
+        const labelY = Math.max(labelHeight, by);
+        ctx.fillStyle = color;
+        const labelX = Math.max(0, Math.min(bx, W - textW));
+        ctx.fillRect(labelX, labelY - labelHeight, textW, labelHeight);
+        ctx.fillStyle = isSel ? '#17232A' : '#FFFFFF';
+        ctx.fillText(labelStr, labelX + 5, labelY - 5, Math.max(1, W - 10));
+
+        // 選取框的 8 點縮放控制點（四角 + 上下左右四邊中點）
+        if (isSel) {
+            const handles = getBoxResizeHandles(bx, by, bw, bh);
+            ctx.fillStyle = '#FFFFFF';
+            ctx.strokeStyle = '#17232A';
+            ctx.lineWidth = 1.5;
+            handles.forEach(({ x: hx, y: hy }) => {
+                ctx.fillRect(hx - 4, hy - 4, 8, 8);
+                ctx.strokeRect(hx - 4, hy - 4, 8, 8);
+            });
+        }
+    });
+}
+
+function initCanvasInteraction() {
+    const canvas = document.getElementById('targetCanvas');
+    const mainWrapper = document.getElementById('mainCanvasWrapper');
+    const masterCanvas = document.getElementById('masterCanvas');
+    const masterWrapper = document.getElementById('masterCanvasWrapper');
+    if (!canvas) return;
+
+    // 支援 Ctrl + 滑鼠滾輪直接縮放畫布
+    const handleWheelZoom = (e) => {
+        if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            adjustZoom(e.deltaY < 0 ? 1.15 : 0.87);
+        }
+    };
+    if (mainWrapper) mainWrapper.addEventListener('wheel', handleWheelZoom, { passive: false });
+    if (masterWrapper) masterWrapper.addEventListener('wheel', handleWheelZoom, { passive: false });
+
+    // 左側並排參考照片畫布：放大時支援滑鼠拖移檢視
+    if (masterWrapper) {
+        masterWrapper.addEventListener('mousedown', (e) => {
+            if (e.button !== 0 && e.button !== 1) return;
+            if (!isCanvasZoomedOrScrollable(masterWrapper)) return;
+            e.preventDefault();
+            dragAction = {
+                mode: 'pan',
+                wrapper: masterWrapper,
+                canvasEl: masterCanvas,
+                startClientX: e.clientX,
+                startClientY: e.clientY,
+                startScrollLeft: masterWrapper.scrollLeft,
+                startScrollTop: masterWrapper.scrollTop,
+                hitBoxIdx: -1,
+                modified: false
+            };
+            if (masterCanvas) masterCanvas.style.cursor = 'grabbing';
+        });
+    }
+
+    // 若使用者在主畫布外圍暗色留白區按住拖曳，且處於放大狀態，亦支援平移照片
+    if (mainWrapper) {
+        mainWrapper.addEventListener('mousedown', (e) => {
+            if (e.target === canvas) return;
+            if ((e.button !== 0 && e.button !== 1) || isDrawBoxMode) return;
+            if (!isCanvasZoomedOrScrollable(mainWrapper)) return;
+            dragAction = {
+                mode: 'pan',
+                wrapper: mainWrapper,
+                canvasEl: canvas,
+                startClientX: e.clientX,
+                startClientY: e.clientY,
+                startScrollLeft: mainWrapper.scrollLeft,
+                startScrollTop: mainWrapper.scrollTop,
+                hitBoxIdx: -1,
+                modified: false
+            };
+            canvas.style.cursor = 'grabbing';
+        });
+    }
+
+    canvas.addEventListener('mousedown', (e) => {
+        if ((e.button !== 0 && e.button !== 1) || !scanData || !canvasRenderState || isSavingCanvas || lastSaveFailed || reviewUpdatePending) return;
+        const item = scanData.items.find(i => i.stem === activeStem);
+        if (!item || !item.has_image) return;
+        if (!Array.isArray(item.boxes)) item.boxes = [];
+
+        const wrapper = document.getElementById('mainCanvasWrapper');
+        const isZoomed = isCanvasZoomedOrScrollable(wrapper);
+
+        const rect = canvas.getBoundingClientRect();
+        const mx = Math.max(0, Math.min(canvasRenderState.drawW, (e.clientX - rect.left) * canvas.width / rect.width));
+        const my = Math.max(0, Math.min(canvasRenderState.drawH, (e.clientY - rect.top) * canvas.height / rect.height));
+        const { drawW, drawH } = canvasRenderState;
+
+        // 滑鼠中鍵：在放大狀態下一律拖移照片
+        if (e.button === 1) {
+            if (isZoomed && wrapper) {
+                e.preventDefault();
+                dragAction = {
+                    mode: 'pan',
+                    wrapper,
+                    canvasEl: canvas,
+                    startClientX: e.clientX,
+                    startClientY: e.clientY,
+                    startScrollLeft: wrapper.scrollLeft,
+                    startScrollTop: wrapper.scrollTop,
+                    hitBoxIdx: -1,
+                    modified: false
+                };
+                canvas.style.cursor = 'grabbing';
+            }
+            return;
+        }
+
+        // 0. 若處於「新增標記框」模式，開始拉出新框
+        if (isDrawBoxMode) {
+            dragAction = {
+                mode: 'create',
+                startX: mx,
+                startY: my,
+                curX: mx,
+                curY: my,
+                modified: false
+            };
+            redrawCanvases();
+            return;
+        }
+
+        // 1. 先檢查是否點到目前選取框的 8 個縮放控制點（四角 + 四邊中點）與選取框內部
+        if (selectedBoxIndex >= 0 && selectedBoxIndex < item.boxes.length) {
+            const b = item.boxes[selectedBoxIndex];
+            const bw = b.w * drawW, bh = b.h * drawH;
+            const bx = b.xc * drawW - bw / 2, by = b.yc * drawH - bh / 2;
+            const handles = getBoxResizeHandles(bx, by, bw, bh);
+            for (const c of handles) {
+                if (Math.abs(mx - c.x) <= 8 && Math.abs(my - c.y) <= 8) {
+                    dragAction = {
+                        mode: 'resize',
+                        corner: c.name,
+                        boxIdx: selectedBoxIndex,
+                        origBox: { ...b },
+                        modified: false
+                    };
+                    return;
+                }
+            }
+            // 若點在「目前已選取」的標記框內部，允許拖曳移動該標記框
+            if (mx >= bx && mx <= bx + bw && my >= by && my <= by + bh) {
+                dragAction = {
+                    mode: 'move',
+                    boxIdx: selectedBoxIndex,
+                    startX: mx,
+                    startY: my,
+                    origBox: { ...b },
+                    wasAlreadySelected: true,
+                    modified: false
+                };
+                return;
+            }
+        }
+
+        // 2. 檢查是否點到任一標記框內部
+        let hitBoxIdx = -1;
+        for (let i = item.boxes.length - 1; i >= 0; i--) {
+            const b = item.boxes[i];
+            const bw = b.w * drawW, bh = b.h * drawH;
+            const bx = b.xc * drawW - bw / 2, by = b.yc * drawH - bh / 2;
+            if (mx >= bx && mx <= bx + bw && my >= by && my <= by + bh) {
+                hitBoxIdx = i;
+                break;
+            }
+        }
+
+        // 3. 若照片處於放大（或出現捲軸）狀態：
+        //    按住滑鼠拖移時一律平移檢視照片 (pan)；若僅單擊未拖移則選取／取消選取標記框
+        if (isZoomed && wrapper) {
+            e.preventDefault();
+            dragAction = {
+                mode: 'pan',
+                wrapper,
+                canvasEl: canvas,
+                startClientX: e.clientX,
+                startClientY: e.clientY,
+                startScrollLeft: wrapper.scrollLeft,
+                startScrollTop: wrapper.scrollTop,
+                hitBoxIdx,
+                modified: false
+            };
+            canvas.style.cursor = 'grabbing';
+            return;
+        }
+
+        // 4. 一般適應視窗狀態（未放大）：點中標記框可直接選取並拖曳微調位置
+        if (hitBoxIdx >= 0) {
+            const b = item.boxes[hitBoxIdx];
+            selectedBoxIndex = hitBoxIdx;
+            defaultDrawClassId = Number(b.class_id);
+            dragAction = {
+                mode: 'move',
+                boxIdx: hitBoxIdx,
+                startX: mx,
+                startY: my,
+                origBox: { ...b },
+                wasAlreadySelected: false,
+                modified: false
+            };
+            renderInspectorAndCanvas();
+            return;
+        }
+
+        selectedBoxIndex = -1;
+        renderInspectorAndCanvas();
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+        if (isDrawBoxMode && !dragAction) {
+            canvasHoverPos = null;
+            redrawCanvases();
+        }
+    });
+
+    window.addEventListener('mousemove', (e) => {
+        if (dragAction && dragAction.mode === 'pan') {
+            const dxClient = e.clientX - dragAction.startClientX;
+            const dyClient = e.clientY - dragAction.startClientY;
+            if (Math.hypot(dxClient, dyClient) >= 4) {
+                dragAction.modified = true;
+            }
+            if (dragAction.wrapper) {
+                dragAction.wrapper.scrollLeft = Math.max(0, dragAction.startScrollLeft - dxClient);
+                dragAction.wrapper.scrollTop = Math.max(0, dragAction.startScrollTop - dyClient);
+                // 若為並排比較模式且拖曳主畫布，同步捲動左側參考照片畫布方便對照
+                if (previewMode === 'side_by_side' && dragAction.wrapper === mainWrapper && masterWrapper) {
+                    const maxMainX = Math.max(1, mainWrapper.scrollWidth - mainWrapper.clientWidth);
+                    const maxMainY = Math.max(1, mainWrapper.scrollHeight - mainWrapper.clientHeight);
+                    const maxMasterX = Math.max(0, masterWrapper.scrollWidth - masterWrapper.clientWidth);
+                    const maxMasterY = Math.max(0, masterWrapper.scrollHeight - masterWrapper.clientHeight);
+                    masterWrapper.scrollLeft = Math.round((mainWrapper.scrollLeft / maxMainX) * maxMasterX);
+                    masterWrapper.scrollTop = Math.round((mainWrapper.scrollTop / maxMainY) * maxMasterY);
+                }
+            }
+            return;
+        }
+
+        if (!canvasRenderState) return;
+        const canvas = document.getElementById('targetCanvas');
+        const item = scanData?.items?.find(i => i.stem === activeStem);
+        if (!canvas || !item) return;
+
+        const rect = canvas.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        const rawX = (e.clientX - rect.left) * canvas.width / rect.width;
+        const rawY = (e.clientY - rect.top) * canvas.height / rect.height;
+        const mx = Math.max(0, Math.min(canvasRenderState.drawW, rawX));
+        const my = Math.max(0, Math.min(canvasRenderState.drawH, rawY));
+        const { drawW, drawH } = canvasRenderState;
+
+        if (!dragAction) {
+            if (isDrawBoxMode) {
+                canvas.style.cursor = 'crosshair';
+                if (rawX >= 0 && rawX <= drawW && rawY >= 0 && rawY <= drawH) {
+                    canvasHoverPos = { x: mx, y: my };
+                    redrawCanvases();
+                }
+                return;
+            }
+            // 動態更新滑鼠游標提示（8 點縮放控制點 / 移動框 / 拖移放大照片）
+            let nextCursor = isCanvasZoomedOrScrollable(mainWrapper) ? 'grab' : 'default';
+            if (selectedBoxIndex >= 0 && item.boxes && item.boxes[selectedBoxIndex]) {
+                const sb = item.boxes[selectedBoxIndex];
+                const sbw = sb.w * drawW, sbh = sb.h * drawH;
+                const sbx = sb.xc * drawW - sbw / 2, sby = sb.yc * drawH - sbh / 2;
+                const handles = getBoxResizeHandles(sbx, sby, sbw, sbh);
+                const hitHandle = handles.find(c => Math.abs(mx - c.x) <= 8 && Math.abs(my - c.y) <= 8);
+                if (hitHandle) {
+                    nextCursor = hitHandle.cursor;
+                } else if (mx >= sbx && mx <= sbx + sbw && my >= sby && my <= sby + sbh) {
+                    nextCursor = 'move';
+                }
+            } else if (!isCanvasZoomedOrScrollable(mainWrapper) && Array.isArray(item.boxes)) {
+                for (let i = item.boxes.length - 1; i >= 0; i--) {
+                    const b = item.boxes[i];
+                    const bw = b.w * drawW, bh = b.h * drawH;
+                    const bx = b.xc * drawW - bw / 2, by = b.yc * drawH - bh / 2;
+                    if (mx >= bx && mx <= bx + bw && my >= by && my <= by + bh) {
+                        nextCursor = 'move';
+                        break;
+                    }
+                }
+            }
+            if (canvas.style.cursor !== nextCursor) {
+                canvas.style.cursor = nextCursor;
+            }
+            return;
+        }
+
+        if (dragAction.mode === 'create') {
+            dragAction.curX = mx;
+            dragAction.curY = my;
+            dragAction.modified = (Math.abs(mx - dragAction.startX) >= 4 && Math.abs(my - dragAction.startY) >= 4);
+            canvasHoverPos = { x: mx, y: my };
+            redrawCanvases();
+            return;
+        }
+
+        const b = item.boxes[dragAction.boxIdx];
+        if (!b) return;
+
+        if (dragAction.mode === 'move') {
+            const dx = (mx - dragAction.startX) / drawW;
+            const dy = (my - dragAction.startY) / drawH;
+            if (Math.abs(dx) > 0.001 || Math.abs(dy) > 0.001) {
+                dragAction.modified = true;
+                b.xc = Math.max(b.w / 2, Math.min(1 - b.w / 2, dragAction.origBox.xc + dx));
+                b.yc = Math.max(b.h / 2, Math.min(1 - b.h / 2, dragAction.origBox.yc + dy));
+                redrawCanvases();
+            }
+        } else if (dragAction.mode === 'resize') {
+            dragAction.modified = true;
+            const ob = dragAction.origBox;
+            let x1 = ob.xc - ob.w / 2;
+            let y1 = ob.yc - ob.h / 2;
+            let x2 = ob.xc + ob.w / 2;
+            let y2 = ob.yc + ob.h / 2;
+            const nx = mx / drawW;
+            const ny = my / drawH;
+
+            if (dragAction.corner.includes('l')) x1 = Math.min(x2 - 0.01, nx);
+            if (dragAction.corner.includes('r')) x2 = Math.max(x1 + 0.01, nx);
+            if (dragAction.corner.includes('t')) y1 = Math.min(y2 - 0.01, ny);
+            if (dragAction.corner.includes('b')) y2 = Math.max(y1 + 0.01, ny);
+
+            b.w = Math.max(0.01, x2 - x1);
+            b.h = Math.max(0.01, y2 - y1);
+            b.xc = (x1 + x2) / 2;
+            b.yc = (y1 + y2) / 2;
+            redrawCanvases();
+        }
+    });
+
+    window.addEventListener('mouseup', () => {
+        if (!dragAction) return;
+        const item = scanData?.items?.find(i => i.stem === activeStem);
+
+        if (dragAction.mode === 'pan') {
+            const panState = dragAction;
+            dragAction = null;
+            if (panState.canvasEl) {
+                panState.canvasEl.style.cursor = isCanvasZoomedOrScrollable(panState.wrapper) ? 'grab' : 'default';
+            }
+            // 若在主畫布僅單擊（未拖移超過 4px），則切換選取／取消選取標記框
+            if (!panState.modified && panState.wrapper === mainWrapper && item) {
+                if (panState.hitBoxIdx >= 0 && Array.isArray(item.boxes) && item.boxes[panState.hitBoxIdx]) {
+                    selectedBoxIndex = panState.hitBoxIdx;
+                    defaultDrawClassId = Number(item.boxes[selectedBoxIndex].class_id);
+                } else {
+                    selectedBoxIndex = -1;
+                }
+                renderInspectorAndCanvas();
+            }
+            return;
+        }
+
+        if (dragAction.mode === 'create') {
+            const { drawW, drawH } = canvasRenderState || { drawW: 1, drawH: 1 };
+            const x1 = Math.max(0, Math.min(dragAction.startX, dragAction.curX) / drawW);
+            const y1 = Math.max(0, Math.min(dragAction.startY, dragAction.curY) / drawH);
+            const x2 = Math.min(1, Math.max(dragAction.startX, dragAction.curX) / drawW);
+            const y2 = Math.min(1, Math.max(dragAction.startY, dragAction.curY) / drawH);
+            const w = x2 - x1;
+            const h = y2 - y1;
+            dragAction = null;
+
+            if (item && w >= 0.01 && h >= 0.01) {
+                pendingNewBox = {
+                    xc: (x1 + x2) / 2,
+                    yc: (y1 + y2) / 2,
+                    w,
+                    h
+                };
+                isDrawBoxMode = false;
+                canvasHoverPos = null;
+                redrawCanvases();
+                openNewBoxClassModal(-1);
+            } else {
+                redrawCanvases();
+            }
+            return;
+        }
+
+        if (dragAction.modified && item) {
+            saveCanvasBoxesToDisk(item.stem, item.boxes);
+        } else if (dragAction.mode === 'move' && dragAction.wasAlreadySelected && isCanvasZoomedOrScrollable(mainWrapper)) {
+            // 在放大狀態下若單擊已選取的標記框且未拖動，可取消選取以便隨時拖移照片
+            selectedBoxIndex = -1;
+            renderInspectorAndCanvas();
+        }
+        dragAction = null;
+    });
+}
+
+async function nudgeSelectedBoxOnCanvas(dxPixels, dyPixels) {
+    const item = scanData?.items?.find(i => i.stem === activeStem);
+    if (isSavingCanvas || lastSaveFailed || reviewUpdatePending || !item || !Array.isArray(item.boxes)) return false;
+    if (selectedBoxIndex < 0 || selectedBoxIndex >= item.boxes.length) return false;
+    const b = item.boxes[selectedBoxIndex];
+    const imgW = Math.max(1, canvasRenderState?.imgW || item.img_width || 640);
+    const imgH = Math.max(1, canvasRenderState?.imgH || item.img_height || 480);
+    const nextXc = Math.max(b.w / 2, Math.min(1 - b.w / 2, b.xc + (dxPixels / imgW)));
+    const nextYc = Math.max(b.h / 2, Math.min(1 - b.h / 2, b.yc + (dyPixels / imgH)));
+    if (Math.abs(nextXc - b.xc) < 1e-7 && Math.abs(nextYc - b.yc) < 1e-7) return true;
+    b.xc = nextXc;
+    b.yc = nextYc;
+    b.x_center = nextXc;
+    b.y_center = nextYc;
+    redrawCanvases();
+    return await saveCanvasBoxesToDisk(item.stem, item.boxes);
+}
+
+async function deleteSelectedBoxOnCanvas() {
+    const item = scanData?.items?.find(i => i.stem === activeStem);
+    if (isSavingCanvas || lastSaveFailed || reviewUpdatePending || !item || selectedBoxIndex < 0 || selectedBoxIndex >= item.boxes.length) return;
+    item.boxes.splice(selectedBoxIndex, 1);
+    selectedBoxIndex = -1;
+    await saveCanvasBoxesToDisk(item.stem, item.boxes);
+}
+
+async function saveCanvasBoxesToDisk(stem, boxes) {
+    isSavingCanvas = true;
+    lastSaveFailed = false;
+    const workspace = scanData?.workspace_id;
+    pendingSavePayload = { workspace, stem, boxes: JSON.parse(JSON.stringify(boxes)) };
+    updateSaveIndicator('saving', '[...] 儲存中');
+
+    activeSavePromise = (async () => {
+        try {
+            const res = await workspaceFetch('/api/save_single_label', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ stem, boxes })
+            });
+            const data = await res.json();
+            if (workspace !== scanData?.workspace_id) return false;
+            if (!data.ok) {
+                throw new Error(data.error || '寫入標記檔失敗');
+            }
+            scanData = data.scan;
+            isSavingCanvas = false;
+            lastSaveFailed = false;
+            pendingSavePayload = null;
+            updateSaveIndicator('saved');
+            updateHeaderAndNavBadges();
+            renderLoadStepSummary();
+            renderStudioFileList();
+            renderInspectorAndCanvas();
+            return true;
+        } catch (err) {
+            if (workspace !== scanData?.workspace_id) return false;
+            isSavingCanvas = false;
+            lastSaveFailed = true;
+            updateSaveIndicator('error', '[✕] 儲存失敗（點擊重試）');
+            showToast(`儲存標記檔失敗：${err.message}`, 'error');
+            return false;
+        }
+    })();
+
+    return activeSavePromise;
+}
+
+async function retryLastFailedSave() {
+    if (!pendingSavePayload || pendingSavePayload.workspace !== scanData?.workspace_id) return false;
+    return await saveCanvasBoxesToDisk(pendingSavePayload.stem, pendingSavePayload.boxes);
+}
+
+// ============================================================================
+// 審核確認、標記需修正、切換上下張與鍵盤快捷鍵
+// ============================================================================
+async function runReviewUpdate(action) {
+    if (reviewUpdatePending) return;
+    reviewUpdatePending = true;
+    try { await action(); }
+    finally { reviewUpdatePending = false; }
+}
+
+async function confirmCurrentAndNext() {
+    return runReviewUpdate(confirmCurrentAndNextInternal);
+}
+
+async function confirmCurrentAndNextInternal() {
+    if (!scanData || !activeStem) return;
+
+    const workspace = scanData.workspace_id;
+    const stem = activeStem;
+
+    // 1. 若有進行中的儲存，先等待完成；若上次儲存失敗，先重試，失敗絕不跳下一張
+    if (isSavingCanvas && activeSavePromise) {
+        const ok = await activeSavePromise;
+        if (!ok || workspace !== scanData?.workspace_id || stem !== activeStem) return;
+    }
+    if (lastSaveFailed) {
+        const retryOk = await retryLastFailedSave();
+        if (!retryOk || workspace !== scanData?.workspace_id || stem !== activeStem) return;
+    }
+
+    const item = scanData.items.find(i => i.stem === activeStem);
+    if (!item || item.box_count === 0 || item.review_status === 'confirmed') return;
+
+    if (item.has_blocking_error) {
+        showToast(`無法標記為已確認：此張照片尚有格式錯誤 (${item.format_label})，請先修正。`, 'error');
+        return;
+    }
+
+    const allowEmpty = (item.box_count === 0);
+    updateSaveIndicator('saving', '[...] 正在儲存確認狀態');
+
+    try {
+        const res = await workspaceFetch('/api/update_review_state', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                stem: item.stem,
+                state: 'confirmed',
+                allow_empty: allowEmpty
+            })
+        });
+        const data = await res.json();
+        if (workspace !== scanData?.workspace_id || stem !== activeStem) return;
+        if (!data.ok) {
+            updateSaveIndicator('error', '確認失敗・重試', confirmCurrentAndNext);
+            showToast(data.error || '無法確認此照片', 'error');
+            return;
+        }
+
+        // 若確認無物件照片新建了 0-byte .txt，重新掃描同步狀態
+        if (!item.has_label && allowEmpty) {
+            await scanCurrentWorkspace({ keepStep: true, silent: true, refreshBoundWorkspace: true });
+            if (workspace !== scanData?.workspace_id || stem !== activeStem) return;
+        } else {
+            item.review_state = 'confirmed';
+            item.review_status = 'confirmed';
+            item.review_label = '已確認';
+            recomputeClientSummaryCounts();
+        }
+
+        updateSaveIndicator('saved');
+        updateHeaderAndNavBadges();
+        renderLoadStepSummary();
+        reviewUpdatePending = false;
+        advanceToNextUnconfirmedOrNext();
+    } catch (e) {
+        if (workspace !== scanData?.workspace_id || stem !== activeStem) return;
+        updateSaveIndicator('error', '確認失敗・重試', confirmCurrentAndNext);
+        showToast('確認失敗，請重試。', 'error');
+    }
+}
+
+async function markCurrentReviewState(targetState) {
+    return;
+    return runReviewUpdate(() => markCurrentReviewStateInternal(targetState));
+}
+
+async function markCurrentReviewStateInternal(targetState) {
+    if (!scanData || !activeStem) return;
+    const workspace = scanData.workspace_id;
+    const stem = activeStem;
+    if (lastSaveFailed && !(await retryLastFailedSave())) return;
+    if (workspace !== scanData?.workspace_id || stem !== activeStem) return;
+    if (isSavingCanvas && activeSavePromise) {
+        const ok = await activeSavePromise;
+        if (!ok || workspace !== scanData?.workspace_id || stem !== activeStem) return;
+    }
+
+    const item = scanData.items.find(i => i.stem === activeStem);
+    if (!item) return;
+
+    try {
+        const res = await workspaceFetch('/api/update_review_state', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                stem: item.stem,
+                state: targetState
+            })
+        });
+        const data = await res.json();
+        if (workspace !== scanData?.workspace_id || stem !== activeStem) return;
+        if (!data.ok) {
+            showToast(data.error || '更新狀態失敗', 'error');
+            return;
+        }
+
+        item.review_state = 'needs_refinement';
+        item.review_status = 'needs_fix';
+        item.review_label = '需修正';
+        recomputeClientSummaryCounts();
+        updateSaveIndicator('saved');
+        updateHeaderAndNavBadges();
+        renderLoadStepSummary();
+        reviewUpdatePending = false;
+        advanceToNextUnconfirmedOrNext();
+    } catch (e) {
+        if (workspace !== scanData?.workspace_id || stem !== activeStem) return;
+        showToast('更新審核狀態失敗', 'error');
+    }
+}
+
+function recomputeClientSummaryCounts() {
+    if (!scanData || !scanData.items) return;
+    const photos = scanData.items.filter(i => i.has_image);
+    const total = photos.length;
+    const confirmed = photos.filter(i => i.review_status === 'confirmed').length;
+    const pending = photos.filter(i => i.review_status === 'pending_review').length;
+    const needsFix = photos.filter(i => i.review_status === 'needs_fix').length;
+    const unlabeled = photos.filter(i => i.review_status === 'unlabeled').length;
+
+    scanData.summary.review_confirmed_count = confirmed;
+    scanData.summary.review_pending_count = pending;
+    scanData.summary.review_needs_fix_count = needsFix;
+    scanData.summary.confirmed_count = confirmed;
+    scanData.summary.pending_review_count = pending;
+    scanData.summary.needs_fix_count = needsFix;
+    scanData.summary.unlabeled_count = unlabeled;
+    scanData.summary.confirmed_pct = total > 0 ? Math.round((confirmed / total) * 1000) / 10 : 0;
+}
+
+function advanceToNextUnconfirmedOrNext() {
+    const list = getActiveReviewItemsList();
+    if (!list.length) { refreshReviewSelection(); return; }
+    const curIdx = list.findIndex(i => i.stem === activeStem);
+
+    // 優先往後找下一張尚未 confirmed 的照片
+    for (let offset = 1; offset < list.length + (curIdx === -1 ? 1 : 0); offset++) {
+        const candidate = list[(curIdx + offset) % list.length];
+        if (candidate.review_status !== 'confirmed') {
+            selectReviewItem(candidate.stem);
+            return;
+        }
+    }
+    // 若清單內全部皆已 confirmed，停在當前或更新完成橫幅
+    renderStudioFileList();
+    renderInspectorAndCanvas();
+    const scopeItems = getReviewScopePhotos();
+    if (scopeItems.length && scopeItems.every(item => item.review_status === 'confirmed')) {
+        showToast('全部照片已確認。', 'success');
+    }
+}
+
+function navigateItem(delta) {
+    const list = getActiveReviewItemsList();
+    if (!list.length) return;
+    const curIdx = list.findIndex(i => i.stem === activeStem);
+    const nextIdx = (curIdx + delta + list.length) % list.length;
+    selectReviewItem(list[nextIdx].stem);
+}
+
+function setCurrentAsMaster() {
+    const item = scanData?.items?.find(i => i.stem === activeStem);
+    if (!item) return;
+    if (!item.is_valid_reference) {
+        showToast('參考照片必須至少有 1 個標記框且無格式錯誤', 'warn');
+        return;
+    }
+    masterStem = item.stem;
+    copySelectedStems.delete(masterStem);
+    renderStudioFileList();
+    renderInspectorAndCanvas();
+    saveSessionProgress();
+}
+
+function initKeyboardShortcuts() {
+    window.addEventListener('keydown', (e) => {
+        // 1. 避免長按重複觸發 (防止長按 C 連續確認多張照片)
+        if (handleModalKey(e)) return;
+        if (e.isComposing) return;
+
+        // Ctrl+Z / ⌘+Z：還原上一步（輸入框內保留瀏覽器原生的文字復原；不連續觸發）
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+            const zTag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
+            if (zTag === 'INPUT' || zTag === 'TEXTAREA' || zTag === 'SELECT' || e.target?.isContentEditable) return;
+            e.preventDefault();
+            if (e.repeat) return;
+            const undoBtn = document.getElementById('btnQuickUndo');
+            if (!undoBtn || undoBtn.disabled) {
+                showToast('目前沒有可還原的操作', 'info');
+                return;
+            }
+            if (typeof isSavingCanvas !== 'undefined' && isSavingCanvas) {
+                showToast('正在儲存，請稍候再還原', 'info');
+                return;
+            }
+            handleUndoLast();
+            return;
+        }
+
+        if (e.repeat) return;
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+        // 2. 在輸入框、下拉選單或彈窗開啟時不觸發畫布快捷鍵
+        const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable ||
+            ((e.key === ' ' || e.key === 'Enter') && (tag === 'BUTTON' || tag === 'SUMMARY'))) {
+            return;
+        }
+
+        if (e.key === '?') {
+            e.preventDefault();
+            openModal('shortcutModal');
+            return;
+        }
+
+        // 以下快捷鍵僅在「3. 檢查與微調」頁面生效
+        if (currentStep !== 'review') return;
+
+        // 方向鍵微調已選取標記框位置（一般 1px；按住 Shift 每次 10px）
+        if (selectedBoxIndex >= 0 && !e.target?.classList?.contains('photo-list-resize')) {
+            const stepPx = e.shiftKey ? 10 : 1;
+            if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                nudgeSelectedBoxOnCanvas(-stepPx, 0);
+                return;
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                nudgeSelectedBoxOnCanvas(stepPx, 0);
+                return;
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                nudgeSelectedBoxOnCanvas(0, -stepPx);
+                return;
+            } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                nudgeSelectedBoxOnCanvas(0, stepPx);
+                return;
+            }
+        }
+
+        if (e.key === 'Escape' && isDrawBoxMode) {
+            e.preventDefault();
+            toggleDrawBoxMode(false);
+        } else if (e.key === 'Escape' && document.getElementById('reviewRightSidebar').classList.contains('expanded')) {
+            e.preventDefault();
+            toggleReviewSidebar('right', e.target);
+        } else if (e.key === 'Escape' && selectedBoxIndex >= 0) {
+            e.preventDefault();
+            selectedBoxIndex = -1;
+            renderInspectorAndCanvas();
+        } else if (e.key === 'w' || e.key === 'W') {
+            e.preventDefault();
+            toggleDrawBoxMode();
+        } else if (e.key === 'b' || e.key === 'B') {
+            e.preventDefault();
+            duplicateSelectedBoxOnCanvas();
+        } else if (e.key === 'd' || e.key === 'D') {
+            e.preventDefault();
+            navigateItem(1);
+        } else if (e.key === 'a' || e.key === 'A') {
+            e.preventDefault();
+            navigateItem(-1);
+        } else if (e.key === 'c' || e.key === 'C') {
+            e.preventDefault();
+            confirmCurrentAndNext();
+        } else if (e.key === 'r' || e.key === 'R') {
+            e.preventDefault();
+            return;
+        } else if (e.key === 'v' || e.key === 'V') {
+            e.preventDefault();
+            const order = ['single', 'side_by_side'];
+            const nextMode = order[(order.indexOf(previewMode) + 1) % order.length];
+            setPreviewMode(nextMode);
+        } else if (e.key === ' ') {
+            e.preventDefault();
+            setCurrentAsMaster();
+        } else if (e.key === 'Delete' || e.key === 'Backspace') {
+            if (selectedBoxIndex >= 0) {
+                e.preventDefault();
+                deleteSelectedBoxOnCanvas();
+            }
+        }
+    });
+}
+
+// ============================================================================
+// 輔助工具彈窗：類別修正、操作紀錄與還原
+// ============================================================================
+let activeModal = null;
+let modalOpener = null;
+
+function handleModalKey(event) {
+    if (!activeModal) return false;
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        if (activeModal.id === 'newBoxClassModal') {
+            cancelNewBoxClassModal();
+        } else {
+            closeModal(activeModal.id);
+        }
+    } else if (event.key === 'Tab') {
+        const controls = Array.from(activeModal.querySelectorAll('button, input, select, textarea, summary, a[href]'))
+            .filter(control => !control.disabled && control.getClientRects().length);
+        const first = controls[0];
+        const last = controls.at(-1);
+        if (event.shiftKey && (document.activeElement === first || !activeModal.contains(document.activeElement))) {
+            event.preventDefault();
+            last?.focus();
+        } else if (!event.shiftKey && (document.activeElement === last || !activeModal.contains(document.activeElement))) {
+            event.preventDefault();
+            first?.focus();
+        }
+    }
+    return true;
+}
+
+function openModal(modalId) {
+    const modal = document.getElementById(modalId);
+    if (!modal) return;
+    const tools = document.querySelector('.utility-tools');
+    if (activeModal) closeModal(activeModal.id);
+    modalOpener = tools?.contains(document.activeElement) ? tools.querySelector('summary') : document.activeElement;
+    tools?.removeAttribute('open');
+    if (modalId === 'remapModal') renderClassRemapEditor();
+    activeModal = modal;
+    modal.style.display = 'flex';
+    modal.querySelector('.btn-close')?.focus();
+}
+
+function closeModal(modalId) {
+    const modal = document.getElementById(modalId);
+    if (modal) modal.style.display = 'none';
+    if (modal === activeModal) {
+        activeModal = null;
+        modalOpener?.focus();
+        modalOpener = null;
+    }
+}
+
+function toggleFolderDetailModal() {
+    openModal('folderDetailModal');
+}
+
+function renderClassRemapEditor() {
+    const wrap = document.getElementById('classRemapEditorWrap');
+    if (!wrap || !scanData || !scanData.ok) return;
+
+    const usedClassIds = new Set();
+    scanData.classes.forEach((_, idx) => usedClassIds.add(idx));
+    scanData.items.forEach(item => {
+        item.boxes.forEach(b => usedClassIds.add(b.class_id));
+    });
+
+    const sortedIds = Array.from(usedClassIds).sort((a, b) => a - b);
+    if (sortedIds.length === 0) {
+        wrap.innerHTML = '<div style="padding:16px;" class="muted-text">目前沒有任何類別定義或標記框。</div>';
+        document.getElementById('classRemapResult').innerHTML = '';
+        document.getElementById('classRemapPreviewBox').innerHTML = '';
+        document.getElementById('btnExecRemap').disabled = true;
+        return;
+    }
+
+    const nameOf = cid => (cid < scanData.classes.length ? scanData.classes[cid] : '');
+    const boxCountOf = cid => scanData.items.reduce((acc, it) => acc + it.boxes.filter(b => b.class_id === cid).length, 0);
+    const photoCountOf = cid => scanData.items.filter(it => it.boxes.some(b => b.class_id === cid)).length;
+
+    const rowsHtml = sortedIds.map(cid => {
+        const curName = nameOf(cid);
+        const boxCnt = boxCountOf(cid);
+        const photoCnt = photoCountOf(cid);
+        const canMerge = sortedIds.length >= 2;
+        const targetOptions = sortedIds
+            .filter(other => other !== cid)
+            .map(other => `<option value="${other}">ID ${other} · ${escapeHtml(nameOf(other) || `未定義(${other})`)}</option>`)
+            .join('');
+        return `
+            <tr class="remap-row" data-orig-id="${cid}" data-box-count="${boxCnt}" data-orig-name="${escapeHtml(curName)}" data-action="keep">
+                <td class="remap-col-class">
+                    <div class="remap-class-cell">
+                        <span class="remap-id-badge">ID ${cid}</span>
+                        <span class="remap-cur-name" title="${escapeHtml(curName || '未定義名稱')}">${curName ? `<strong>${escapeHtml(curName)}</strong>` : '<span class="text-red">[!] 未定義名稱</span>'}</span>
+                    </div>
+                </td>
+                <td class="remap-col-count"><strong>${boxCnt}</strong> 個框 <span class="muted-text">(${photoCnt} 張照片)</span></td>
+                <td class="remap-col-action">
+                    <div class="remap-action-seg" role="group" aria-label="類別 ${cid} 的處理動作">
+                        <button type="button" class="remap-seg-btn active" data-act="keep" aria-pressed="true" onclick="setRemapRowAction(this, 'keep')">改名／保留</button>
+                        <button type="button" class="remap-seg-btn" data-act="merge" aria-pressed="false"${canMerge ? '' : ' disabled title="至少需有 2 個類別才能合併"'} onclick="setRemapRowAction(this, 'merge')">合併到其他類別</button>
+                        <button type="button" class="remap-seg-btn remap-seg-danger" data-act="delete" aria-pressed="false" onclick="setRemapRowAction(this, 'delete')">刪除此類別</button>
+                    </div>
+                </td>
+                <td class="remap-col-setting">
+                    <div class="remap-setting-pane">
+                        <div class="remap-setting-group remap-setting-keep">
+                            <span class="remap-field-label">名稱：</span>
+                            <input type="text" class="form-input-sm remap-new-name" aria-label="類別 ${cid} 的新名稱" value="${escapeHtml(curName || `class_${cid}`)}" placeholder="輸入類別名稱">
+                        </div>
+                        <div class="remap-setting-group remap-setting-merge" hidden>
+                            <span class="remap-field-label">將標記框併入：</span>
+                            <select class="form-select-sm remap-merge-target" aria-label="類別 ${cid} 要合併到的目標類別">${targetOptions}</select>
+                        </div>
+                        <div class="remap-setting-group remap-setting-delete" hidden>
+                            <span class="remap-delete-note">將移除 ${boxCnt} 個標記框（共 ${photoCnt} 張照片）</span>
+                        </div>
+                        <span class="remap-col-result"></span>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }).join('');
+
+    wrap.innerHTML = `
+        <table class="data-table remap-table">
+            <thead>
+                <tr>
+                    <th class="remap-col-class">目前類別</th>
+                    <th class="remap-col-count">標記框數量</th>
+                    <th class="remap-col-action">選擇要執行的動作</th>
+                    <th class="remap-col-setting">動作設定與結果</th>
+                </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+        </table>
+    `;
+    validatedRemapPayload = null;
+    wrap.oninput = () => { updateRemapSummary(); scheduleRemapPreview(); };
+    wrap.onchange = () => { updateRemapSummary(); scheduleRemapPreview(); };
+    updateRemapSummary();
+    scheduleRemapPreview();
+}
+
+function setRemapRowAction(btnEl, action) {
+    const tr = btnEl.closest('tr');
+    if (!tr) return;
+    tr.dataset.action = action;
+    tr.querySelectorAll('.remap-seg-btn').forEach(b => {
+        const isAct = b.dataset.act === action;
+        b.classList.toggle('active', isAct);
+        b.setAttribute('aria-pressed', String(isAct));
+    });
+    tr.querySelector('.remap-setting-keep').hidden = action !== 'keep';
+    tr.querySelector('.remap-setting-merge').hidden = action !== 'merge';
+    tr.querySelector('.remap-setting-delete').hidden = action !== 'delete';
+    if (action === 'keep') tr.querySelector('.remap-new-name')?.focus();
+    else if (action === 'merge') tr.querySelector('.remap-merge-target')?.focus();
+    updateRemapSummary();
+    scheduleRemapPreview();
+}
+
+let validatedRemapPayload = null;
+let remapPreviewTimer = null;
+
+function invalidateRemapPreview() {
+    validatedRemapPayload = null;
+    if (remapPreviewTimer) {
+        clearTimeout(remapPreviewTimer);
+        remapPreviewTimer = null;
+    }
+    const btn = document.getElementById('btnExecRemap');
+    if (btn) btn.disabled = true;
+}
+
+function scheduleRemapPreview() {
+    if (remapPreviewTimer) clearTimeout(remapPreviewTimer);
+    remapPreviewTimer = setTimeout(() => {
+        previewClassRemapOperation({ silent: true });
+    }, 150);
+}
+
+/**
+ * 依使用者在表格中的選擇，計算類別修正方案：
+ * - 改名／保留：維持類別（可改名稱）
+ * - 合併到其他類別：此類別的標記框改歸入目標類別，原類別編號移除
+ * - 刪除此類別：移除此類別的所有標記框
+ * classes.txt 的編號必須連續，因此保留下來的類別會依原順序自動重新編號。
+ */
+function resolveRemapPlan() {
+    const rows = Array.from(document.querySelectorAll('.remap-row')).map(tr => ({
+        id: parseInt(tr.dataset.origId, 10),
+        boxCount: parseInt(tr.dataset.boxCount, 10) || 0,
+        origName: tr.dataset.origName || '',
+        action: tr.dataset.action || 'keep',
+        name: tr.querySelector('.remap-new-name').value.trim(),
+        mergeTo: parseInt(tr.querySelector('.remap-merge-target').value, 10)
+    }));
+    const byId = new Map(rows.map(r => [r.id, r]));
+    const errors = [];
+
+    // 解析合併鏈，找出最終保留的類別
+    const finalOf = new Map();
+    rows.forEach(r => {
+        if (r.action === 'delete') { finalOf.set(r.id, null); return; }
+        let cur = r;
+        const seen = new Set();
+        while (cur && cur.action === 'merge') {
+            if (seen.has(cur.id)) { errors.push(`類別 ID ${r.id} 的合併設定形成循環，請改選其他目標。`); cur = null; break; }
+            seen.add(cur.id);
+            cur = byId.get(cur.mergeTo);
+        }
+        if (cur && cur.action === 'delete') {
+            errors.push(`類別 ID ${r.id} 要合併到的目標類別 ID ${cur.id} 已設為刪除，請改選其他目標。`);
+            cur = null;
+        }
+        finalOf.set(r.id, cur ? cur.id : undefined);
+    });
+
+    // 保留下來的類別依原順序重新編號
+    const keepers = rows.filter(r => r.action === 'keep');
+    const newIdOfKeeper = new Map(keepers.map((r, idx) => [r.id, idx]));
+    const newClasses = keepers.map(r => r.name || `class_${r.id}`);
+
+    const seenNames = new Map();
+    newClasses.forEach((name, idx) => {
+        if (seenNames.has(name)) errors.push(`類別名稱「${name}」重複，請改用不同名稱或選擇「合併到其他類別」。`);
+        seenNames.set(name, idx);
+    });
+    if (keepers.length === 0) errors.push('至少要保留一個類別。');
+
+    const mapping = {};
+    const resultText = new Map();
+    let hasChanges = false;
+    rows.forEach(r => {
+        const fin = finalOf.get(r.id);
+        if (fin === null) {
+            mapping[r.id] = null;
+            hasChanges = true;
+            resultText.set(r.id, { text: '', tone: 'delete' });
+        } else if (fin === undefined) {
+            resultText.set(r.id, { text: '設定有誤，請檢查', tone: 'error' });
+        } else {
+            const nid = newIdOfKeeper.get(fin);
+            mapping[r.id] = nid;
+            const keeperRow = byId.get(fin);
+            const finalName = (keeperRow && keeperRow.name) ? keeperRow.name : `class_${fin}`;
+            if (r.action === 'merge') {
+                hasChanges = true;
+                resultText.set(r.id, { text: `併入 ID ${nid} (${finalName})`, tone: 'merge' });
+            } else {
+                const idChanged = nid !== r.id;
+                const nameChanged = finalName !== r.origName;
+                if (idChanged || nameChanged) hasChanges = true;
+                if (!idChanged && !nameChanged) {
+                    resultText.set(r.id, { text: '維持原設定', tone: 'same' });
+                } else if (!idChanged && nameChanged) {
+                    resultText.set(r.id, { text: `改名為「${finalName}」`, tone: 'renumber' });
+                } else if (idChanged && !nameChanged) {
+                    resultText.set(r.id, { text: `編號改為 ID ${nid}`, tone: 'renumber' });
+                } else {
+                    resultText.set(r.id, { text: `改名並改為 ID ${nid}`, tone: 'renumber' });
+                }
+            }
+        }
+    });
+
+    return { ok: errors.length === 0, errors, mapping, new_classes: newClasses, rows, resultText, hasChanges };
+}
+
+function updateRemapSummary() {
+    const box = document.getElementById('classRemapResult');
+    if (!box) return;
+    const plan = resolveRemapPlan();
+    plan.rows.forEach(r => {
+        const cell = document.querySelector(`.remap-row[data-orig-id="${r.id}"] .remap-col-result`);
+        const info = plan.resultText.get(r.id);
+        if (!cell) return;
+        if (info && info.text) {
+            cell.innerHTML = `<span class="remap-result-tag tone-${info.tone}">${escapeHtml(info.text)}</span>`;
+        } else {
+            cell.innerHTML = '';
+        }
+    });
+    if (!plan.ok) {
+        box.className = 'remap-result has-error';
+        box.innerHTML = plan.errors.map(e => `<div>[✕] ${escapeHtml(e)}</div>`).join('');
+    } else {
+        box.className = 'remap-result';
+        const list = plan.new_classes.map((n, i) => `<span class="remap-final-item"><span class="remap-final-id">ID ${i}</span> <strong>${escapeHtml(n)}</strong></span>`).join('');
+        box.innerHTML = `<div class="remap-final-title">修正後的類別清單（classes.txt）：</div><div class="remap-final-list">${list}</div>`;
+    }
+    const execBtn = document.getElementById('btnExecRemap');
+    if (execBtn) execBtn.disabled = !plan.ok || !plan.hasChanges;
+    if (!plan.hasChanges && plan.ok) {
+        document.getElementById('classRemapPreviewBox').innerHTML =
+            '<span class="muted-text">尚未變更任何設定。可直接修改「名稱」輸入框改名，或點選「合併到其他類別」、「刪除此類別」。</span>';
+    }
+}
+
+function collectClassRemapPayload() {
+    const plan = resolveRemapPlan();
+    if (!plan.ok) return null;
+    return { mapping: plan.mapping, new_classes: plan.new_classes };
+}
+
+async function previewClassRemapOperation(options = {}) {
+    const plan = resolveRemapPlan();
+    if (!plan.ok) {
+        if (!options.silent) showToast('請先修正類別設定中的問題。', 'warn');
+        return false;
+    }
+    if (!plan.hasChanges) {
+        validatedRemapPayload = null;
+        return false;
+    }
+    const payload = { mapping: plan.mapping, new_classes: plan.new_classes };
+    const fingerprint = JSON.stringify(payload);
+    try {
+        const res = await workspaceFetch('/api/class_remap/preview', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: fingerprint
+        });
+        const data = await res.json();
+        if (fingerprint !== JSON.stringify(collectClassRemapPayload())) return false;
+        const errors = [...(data.validation_errors || []), ...(data.continuity_warnings || [])];
+        if (!res.ok || !data.ok || errors.length) {
+            throw new Error(data.error || errors.join('；') || '類別修正預覽失敗');
+        }
+        const p = data.preview;
+        document.getElementById('classRemapPreviewBox').innerHTML = `
+            <div><strong>預計影響範圍：</strong>將更新 <strong>${p.affected_files_count}</strong> 個標記檔（轉移 <strong>${p.remapped_boxes_count}</strong> 框 · 刪除 <strong>${p.deleted_boxes_count}</strong> 框） · 修改名稱 <strong>${p.rename_only_classes.length}</strong> 項（執行前會自動建立備份，隨時可按 Ctrl+Z 還原）</div>`;
+        validatedRemapPayload = fingerprint;
+        document.getElementById('btnExecRemap').disabled = false;
+        return true;
+    } catch (error) {
+        document.getElementById('classRemapPreviewBox').textContent = error.message;
+        if (!options.silent) showToast(error.message, 'error');
+        return false;
+    }
+}
+
+async function executeClassRemapOperation() {
+    const payload = collectClassRemapPayload();
+    if (!payload) {
+        updateRemapSummary();
+        showToast('請先修正類別設定中的問題。', 'warn');
+        return;
+    }
+    const fingerprint = JSON.stringify(payload);
+    if (validatedRemapPayload !== fingerprint) {
+        const ok = await previewClassRemapOperation({ silent: false });
+        if (!ok) return;
+    }
+    const button = document.getElementById('btnExecRemap');
+    button.disabled = true;
+    try {
+        const res = await workspaceFetch('/api/class_remap/execute', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || '類別修正執行失敗');
+        scanData = data.scan;
+        updateHeaderAndNavBadges();
+        renderLoadStepSummary();
+        if (currentStep === 'apply') renderBatchApplyStep();
+        if (currentStep === 'review') {
+            ensureValidActiveItemForReview();
+            renderStudioFileList();
+            renderInspectorAndCanvas();
+        }
+        closeModal('remapModal');
+        showToast(`類別修正完成（更新 ${data.results.modified_files_count} 個標記檔），已自動建立備份。`, 'success');
+    } catch (error) {
+        showToast(error.message, 'error');
+    } finally {
+        validatedRemapPayload = null;
+        button.disabled = true;
+    }
+}
+
+let undoInProgress = false;
+
+async function handleUndoLast() {
+    if (undoInProgress) return;
+    undoInProgress = true;
+    const tools = document.querySelector('.utility-tools');
+    if (tools?.open) {
+        tools.open = false;
+        tools.querySelector('summary')?.focus();
+    }
+    try {
+        const res = await workspaceFetch('/api/undo', { method: 'POST' });
+        const data = await res.json();
+        if (!data.ok) {
+            showToast(data.message || data.error || '目前沒有可還原的備份', 'warn');
+            return;
+        }
+        scanData = data.scan;
+        document.getElementById('applySuccessBanner').style.display = 'none';
+        if (Array.isArray(scanData.session?.review_queue)) {
+            reviewQueue = scanData.session.review_queue;
+        }
+        updateHeaderAndNavBadges();
+        renderLoadStepSummary();
+        if (currentStep === 'apply') renderBatchApplyStep();
+        if (currentStep === 'review') {
+            ensureValidActiveItemForReview();
+            renderStudioFileList();
+            renderInspectorAndCanvas();
+        }
+        showToast(`[✓] ${data.message}`, 'success');
+    } catch (e) {
+        showToast('執行還原時發生錯誤', 'error');
+    } finally {
+        undoInProgress = false;
+    }
+}
+
+// ============================================================================
+// 通用輔助函式
+// ============================================================================
+function showToast(message, type = 'info') {
+    const container = document.getElementById('toastContainer');
+    if (!container) return;
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+    setTimeout(() => {
+        toast.remove();
+    }, 4200);
+}
+
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function escapeJsStr(str) {
+    if (str === null || str === undefined) return '';
+    return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}

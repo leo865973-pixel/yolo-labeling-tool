@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 影像標記工具</title>
+    <link rel="stylesheet" href="./static/css/style.css">
+</head>
+<body>
+    <!-- 精簡深色頁首 (#17232A) -->
+    <header class="app-header">
+        <div class="header-brand">
+            <span class="brand-mark">AI HUB</span>
+            <h1 class="app-title" title="GitHub Pages 網頁版">AI 影像標記工具</h1>
+            <div id="headerFolderBox" class="folder-indicator" style="display: none;">
+                <span class="folder-label">目前資料夾：</span>
+                <button class="folder-name-btn" id="headerFolderName" onclick="toggleFolderDetailModal()" title="點擊查看完整路徑"></button>
+                <button class="btn-xs" style="margin-left:6px;background:#2874A6;color:#fff;border-color:#3498DB;" onclick="pickAndLoadFolder()" title="直接選擇並載入您的正式照片資料夾">選擇照片資料夾</button>
+            </div>
+        </div>
+
+        <!-- 右側輔助工具列（不強迫依序經過） -->
+        <div class="header-actions">
+            <button class="util-btn util-undo-btn" id="btnQuickUndo" onclick="handleUndoLast()" disabled title="還原最近一次批次套用、畫布修改或類別修正 (Ctrl+Z)">
+                ↩ 還原上一步
+            </button>
+            <button class="util-btn" onclick="openModal('pathSettingsModal')">路徑設定</button>
+            <button class="util-btn" onclick="openModal('shortcutModal')" title="查看鍵盤快捷鍵 (?)">
+                快捷鍵說明
+            </button>
+        </div>
+    </header>
+    <nav class="workspace-nav" aria-label="專案工作區">
+        <button class="workspace-nav-btn" id="navBtnReview" data-step="review" onclick="switchStep('review')" disabled>
+            標記檢視
+            <span id="navBadgePending" class="nav-pill warn" style="display: none;"></span>
+        </button>
+        <button class="workspace-nav-btn" id="navBtnApply" data-step="apply" onclick="switchStep('apply')" disabled>
+            批次套用
+            <span id="navBadgeUnlabeled" class="nav-pill" style="display: none;"></span>
+        </button>
+        <button class="workspace-nav-btn workspace-nav-tool" id="btnUtilRemap" onclick="openModal('remapModal')" disabled title="修改類別名稱、合併或刪除類別">類別修正</button>
+    </nav>
+    <div id="workspaceLoadStatus" class="workspace-status" role="status" hidden></div>
+
+    <!-- 主作業區 -->
+    <main class="app-main">
+
+        <!-- ==================================================================
+             步驟 1：載入資料 (首次使用引導 + 載入後可執行摘要與問題分組)
+             ================================================================== -->
+        <section id="step-load" class="step-view active">
+            <div class="load-page-container">
+
+                <!-- A. 未載入資料時的首次歡迎畫面 -->
+                <div id="welcomeLandingCard" class="welcome-landing">
+                    <div class="surface-card welcome-hero-card">
+                        <h2 class="welcome-title">載入照片，開始標記</h2>
+
+                        <div class="welcome-cta-row">
+                            <button class="btn btn-primary btn-xl" id="btnWelcomePickFolder" onclick="pickAndLoadFolder()">
+                                選擇照片資料夾
+                            </button>
+                        </div>
+
+                        <div class="welcome-path-box">
+                            <label for="inputImageDir" class="welcome-path-label">或直接貼上資料夾路徑</label>
+                            <div class="input-row">
+                                <input type="text" id="inputImageDir" class="form-input" value="" placeholder="例如 D:\照片\產線A">
+                                <button class="btn btn-secondary" onclick="scanCurrentWorkspace()">載入此路徑</button>
+                            </div>
+                        </div>
+
+                        <ul class="welcome-facts" aria-label="支援內容">
+                            <li>支援 JPG／PNG／BMP／WEBP</li>
+                            <li>YOLO 格式標記檔</li>
+                            <li>修改前自動備份，可還原</li>
+                        </ul>
+                    </div>
+
+                    <section class="surface-card welcome-flow" aria-label="使用流程">
+                        <h3 class="welcome-flow-title">使用流程</h3>
+                        <ol class="welcome-steps">
+                            <li>
+                                <span class="welcome-step-no">1</span>
+                                <div><strong>載入照片</strong><p>選擇資料夾，檢查標記檔與類別是否完整。</p></div>
+                            </li>
+                            <li>
+                                <span class="welcome-step-no">2</span>
+                                <div><strong>標記檢視</strong><p>逐張確認標記框，可直接拖曳調整，需修正的照片可先標記。</p></div>
+                            </li>
+                            <li>
+                                <span class="welcome-step-no">3</span>
+                                <div><strong>批次套用</strong><p>以已標記的參考照片，為相似的未標記照片建立標記草稿。</p></div>
+                            </li>
+                        </ol>
+                        <p class="welcome-flow-note">批次套用後的標記仍需人工確認，不會自動視為完成。</p>
+                    </section>
+                </div>
+
+                <!-- B. 載入資料後的摘要與下一步引導畫面 -->
+                <div id="loadedSummaryArea" style="display: none;">
+
+                    <!-- 主要行動摘要橫幅 -->
+                    <div class="surface-card action-hero-card">
+                        <div class="action-hero-left">
+                            <div class="folder-tag-row">
+                                <span class="badge badge-neutral" id="summaryFolderNameTag">資料夾</span>
+                                <span class="muted-text" id="summaryClassesTag">類別檔</span>
+                                <button class="btn btn-secondary btn-sm" onclick="pickAndLoadFolder()">更換資料夾</button>
+                                <button class="btn-link" onclick="toggleLoadSettingsPanel()">路徑設定</button>
+                            </div>
+                            <h2 id="actionHeroHeadline" class="hero-headline">找到 0 張照片</h2>
+                            <p id="actionHeroSubtext" class="hero-subtext"></p>
+                        </div>
+                        <div id="actionHeroButtons" class="action-hero-right"></div>
+                    </div>
+
+                    <!-- 可收合的更換資料夾與路徑設定區 -->
+                    
+
+                    <!-- 雙面向狀態統計卡片：A. 檔案與格式檢查 vs B. 人工作業進度 -->
+                    <section class="surface-card project-overview" aria-labelledby="projectStatsTitle">
+                        <h3 id="projectStatsTitle">專案統計</h3>
+                        <dl class="project-metrics">
+                            <div><dt>照片總數</dt><dd id="statPhotoCnt">0</dd></div>
+                            <div><dt>未標記</dt><dd id="statRevUnlabeled">0</dd></div>
+                            <div><dt>待確認</dt><dd id="statRevPending">0</dd></div>
+                            <div><dt>需修正</dt><dd id="statRevNeedsFix">0</dd></div>
+                            <div><dt>已確認</dt><dd id="statRevConfirmed">0</dd></div>
+                        </dl>
+                    </section>
+
+                    <!-- 同類問題分組與直接處理入口 -->
+                    <div class="surface-card">
+                        <div class="card-section-header">
+                            <div>
+                                <h3>待處理項目</h3>
+
+                            </div>
+                        </div>
+                        <div id="issueGroupsContainer" class="issue-groups-list"></div>
+                    </div>
+
+                </div>
+            </div>
+        </section>
+
+        <!-- ==================================================================
+             步驟 2：批次套用 (聚焦三件事：1.選參考照片 -> 2.選要套用的照片 -> 3.預覽並建立標記草稿)
+             ================================================================== -->
+        <section id="step-apply" class="step-view">
+            <div class="apply-page-layout">
+
+                <!-- 批次套用完成後的提示橫幅（完成建立標記草稿時顯示） -->
+                <div id="applySuccessBanner" role="status" class="apply-done-banner" style="display: none;"></div>
+
+                <div class="apply-columns">
+                    <!-- 左側：參考照片 & 套用目標 -->
+                    <div class="surface-card apply-left-col">
+                        <!-- 第 1 步：選擇參考照片 -->
+                        <div class="apply-block">
+                            <div class="block-header">
+                                <div>
+                                    <h3>參考照片</h3>
+
+                                </div>
+                            </div>
+                            <div id="referenceSelectorArea" class="reference-selector-bar"></div>
+                        </div>
+
+                        <!-- 第 2 步：選擇要套用的照片 -->
+                        <div class="apply-block" style="flex:1;display:flex;flex-direction:column;min-height:0;margin-top:14px;">
+                            <div class="block-header">
+                                <div>
+                                    <h3>套用目標</h3>
+
+                                </div>
+                                <div class="target-toolbar">
+                                    <button class="btn btn-secondary btn-sm" onclick="runSimilarPhotoFinder()">
+                                        找出相似照片
+                                    </button>
+                                    <button class="btn btn-ghost btn-sm" onclick="selectAllUnlabeledForCopy()">
+                                        全選未標記照片
+                                    </button>
+                                    <button class="btn btn-ghost btn-sm" onclick="clearAllCopyTargets()">
+                                        取消全選
+                                    </button>
+                                    <span class="selected-counter-pill">已選 <strong id="copyTargetCount">0</strong> 張</span>
+                                </div>
+                            </div>
+
+<details class="similarity-settings"><summary>相似照片設定</summary>
+                                <div class="adv-row">
+                                    <label class="adv-label" for="numSimThreshold">相似度門檻：</label>
+                                    <div class="inline-controls-row">
+                                        <input type="number" id="numSimThreshold" aria-label="相似度門檻" value="0.75" min="0.5" max="0.99" step="0.05" class="form-input-xs">
+                                    </div>
+                                </div>
+                            </details>
+                            <!-- 相似照片篩選結果列（點擊「找出相似照片」時顯示） -->
+                            <div id="recommendedGroupsBar" class="sim-groups-strip" style="display: none;"></div>
+
+                            <!-- 照片卡片網格 -->
+                            <div id="copyPhotoGrid" class="photo-cards-grid"></div>
+                        </div>
+                    </div>
+
+                    <!-- 右側：套用預覽 + 進階設定收合 -->
+                    <div class="surface-card apply-right-col">
+                        <div class="block-header">
+                            <div>
+                                <h3>寫入預覽</h3>
+
+                            </div>
+                        </div>
+
+                        <!-- 執行前真實資料摘要區 -->
+                        <div id="applySummaryCards" class="apply-summary-box"></div>
+
+                        <!-- 進階設定（預設收合：演算法與門檻、類別篩選、輸出資料夾、覆蓋既有標記） -->
+                        <details class="advanced-apply-details">
+                            <summary>套用設定</summary>
+                            <div class="advanced-apply-body">
+                                <div class="adv-row">
+                                    <label class="adv-label">複製類別篩選：</label>
+                                    <div id="copyClassFilterCheckboxes" class="class-check-wrap"></div>
+                                </div>
+                                <div class="adv-row">
+                                    <label class="checkbox-inline">
+                                        <input type="checkbox" id="chkOverwriteExisting" onchange="runMasterCopyPreview()">
+                                        <span><strong>覆蓋既有標記</strong></span>
+                                    </label>
+                                </div>
+                                <div class="adv-row">
+                                    <label class="adv-label">輸出資料夾：</label>
+                                    <div class="inline-controls-row" style="flex:1;">
+                                        <input type="text" id="inputCopyOutputDir" class="form-input-sm" aria-label="輸出資料夾" style="flex:1;" placeholder="預設：標記資料夾" oninput="runMasterCopyPreview()">
+                                        <button class="btn-xs" onclick="pickPath('inputCopyOutputDir', 'folder')">選擇...</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </details>
+
+                        <!-- 個別目標照片預覽清單 -->
+                        <div id="masterCopyPreviewContainer" class="preview-list-wrap"></div>
+
+                        <!-- 主要執行按鈕（動態文案） -->
+                        <div class="apply-footer-cta">
+                            <div id="copyPreviewStatus" class="inline-feedback" role="status" aria-live="polite"></div>
+                            <button id="btnExecuteMasterCopy" class="btn btn-primary btn-xl btn-block" onclick="runMasterCopyExecute()">
+                                建立草稿
+                            </button>
+
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ==================================================================
+             步驟 3：檢查與微調 (最大化中央畫布 + 佇列進度 + 明確儲存狀態 + 確認並下一張)
+             ================================================================== -->
+        <section id="step-review" class="step-view">
+            <div class="review-workspace" id="reviewWorkspace">
+
+                <!-- 左側：可收合的照片清單欄 -->
+                <aside class="review-left-sidebar" id="reviewLeftSidebar">
+                    <div class="sidebar-top-controls">
+                        <input type="text" id="searchInput" aria-label="搜尋檔名" class="form-input-sm" placeholder="搜尋檔名..." oninput="applyReviewSearch()">
+                        <div class="filter-chips-wrap" id="allScopeFilterChips" role="group" aria-label="快速篩選">
+                            <button class="f-chip active" data-filter="all" aria-pressed="true" onclick="applyQuickFilter('all')">全部</button>
+                            <button class="f-chip" data-filter="unlabeled" aria-pressed="false" onclick="applyQuickFilter('unlabeled')">未標記</button>
+                            <button class="f-chip" data-filter="pending_review" aria-pressed="false" onclick="applyQuickFilter('pending_review')">待確認</button>
+                            <button class="f-chip" data-filter="confirmed" aria-pressed="false" onclick="applyQuickFilter('confirmed')">已確認</button>
+                        </div>
+                    </div>
+                    <div id="reviewCountsSummary" class="sidebar-progress">已確認 0 張</div>
+                    <div id="studioFileList" class="review-photo-list"></div>
+                </aside>
+
+                <div id="photoListResize" class="photo-list-resize" role="separator" tabindex="0"
+                     aria-label="調整照片清單寬度" aria-controls="reviewLeftSidebar" aria-orientation="vertical"
+                     aria-valuemin="220" aria-valuemax="520" aria-valuenow="280"
+                     title="拖曳調整清單寬度；聚焦後可用左右方向鍵調整"></div>
+
+                <!-- 中央：主畫布與頂部/底部操作列 -->
+                <div class="review-center-stage">
+                    <!-- 畫布頂部精簡狀態與次要檢視工具列 -->
+                    <div class="review-top-bar">
+                        <div class="top-bar-left">
+                            <button class="btn-xs" aria-controls="reviewLeftSidebar" onclick="toggleReviewSidebar('left', this)" title="收合或展開左側照片清單">☰ 清單</button>
+                            <span class="current-file-title" id="reviewCurrentFileName">尚未選取照片</span>
+                            <span class="ref-badge" id="reviewRefBadge" hidden title="批次套用時，會以這張照片的標記框為來源">★ 參考照片</span>
+                            <span class="review-position" id="reviewQueueProgress"></span>
+                            <!-- 明確儲存狀態指示器（置於顯眼處） -->
+                            <button type="button" id="saveStatusIndicator" aria-live="polite" class="save-badge saved" disabled>[✓] 已儲存</button>
+                        </div>
+
+                        <div class="review-mode-bar">
+                            <!-- 檢視比較模式切換 -->
+                            <div class="compare-mode-group">
+                                <button class="cmp-btn active" aria-pressed="true" data-vmode="single" onclick="setPreviewMode('single')">單張檢視</button>
+                                <button class="cmp-btn" aria-pressed="false" data-vmode="side_by_side" onclick="setPreviewMode('side_by_side')" title="與參考照片並排比較 (V)">並排比較</button>
+                            </div>
+                            <!-- 縮放 -->
+                            <div class="zoom-btns" role="group" aria-label="畫面縮放">
+                                <button class="btn-xs" onclick="adjustZoom(0.85)" title="縮小" aria-label="縮小">−</button>
+                                <span id="zoomLevelText" class="zoom-label" role="status">適應視窗</span>
+                                <button class="btn-xs" onclick="adjustZoom(1.18)" title="放大" aria-label="放大">+</button>
+                                <button class="btn-xs" onclick="resetZoom()" title="回到適應視窗大小">重設縮放</button>
+                            </div>
+                        </div>
+
+                        <div class="top-bar-right">
+                            <button class="btn-xs btn-details-toggle" aria-controls="reviewRightSidebar" aria-expanded="false" onclick="toggleReviewSidebar('right', this)">詳細資訊</button>
+                        </div>
+                    </div>
+
+                    <!-- 任務全部確認完成時的通知列 -->
+                    <div id="queueCompletedBanner" class="queue-complete-banner" style="display: none;"></div>
+
+                    <div id="reviewEmptyState" class="review-empty-state" hidden role="status">
+                        <strong>沒有符合的照片</strong>
+                        <span>清除搜尋與篩選後，繼續檢查。</span>
+                    </div>
+                    <!-- 畫布主視窗（保持照片正確比例，不扭曲照片） -->
+                    <div class="canvas-stage-area" id="canvasViewport">
+                        <!-- 並排比較時的左側參考照片畫布 -->
+                        <div class="canvas-pane-box" id="masterCanvasPane" style="display: none;">
+                            <div class="pane-subcaption pane-reference"><strong>左側 · 參考照片</strong><span id="masterCanvasCaption"></span></div>
+                            <div class="canvas-flex-center" id="masterCanvasWrapper">
+                                <canvas id="masterCanvas"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- 主操作畫布 -->
+                        <div class="canvas-pane-box" id="targetCanvasPane">
+                            <div class="pane-subcaption">
+                                <strong id="targetCanvasRole">目前照片</strong><span id="targetCanvasCaption"></span><span id="comparisonStatus" role="status"></span>
+
+                            </div>
+                            <div class="canvas-flex-center" id="mainCanvasWrapper">
+                                <canvas id="targetCanvas"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 底部審核決策與次要操作列（主操作置中凸顯） -->
+                    <div class="review-bottom-bar">
+                        <!-- 左側次要操作：上一張 / 下一張 -->
+                        <div class="bottom-secondary-left">
+                            <button class="btn btn-secondary" onclick="navigateItem(-1)" title="快捷鍵：A" aria-keyshortcuts="A">
+                                上一張 (A)
+                            </button>
+                            <button class="btn btn-secondary" onclick="navigateItem(1)" title="快捷鍵：D" aria-keyshortcuts="D">
+                                下一張 (D)
+                            </button>
+                        </div>
+
+                        <!-- 中央主要操作：需修正 vs 確認並下一張 -->
+                        <div class="bottom-primary-center">
+                            
+                            <button class="btn btn-primary btn-lg" id="btnConfirmAndNext" onclick="confirmCurrentAndNext()" title="確認目前標記位置正確並前往下一張 (快捷鍵 C)">
+                                確認並下一張 (C)
+                            </button>
+                        </div>
+
+                        <!-- 右側次要操作：設為參考照片 -->
+                        <div class="bottom-secondary-right">
+                            <div class="direct-review-actions">
+                            <button class="btn btn-ghost" id="btnSetMaster" onclick="setCurrentAsMaster()" title="將此張已標記照片設為參考照片 (快捷鍵 Space)">
+                                設為參考
+                            </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="boxListResize" class="photo-list-resize box-list-resize" role="separator" tabindex="0"
+                     aria-label="調整標記框清單寬度" aria-controls="pinnedBoxesSidebar" aria-orientation="vertical"
+                     aria-valuemin="220" aria-valuemax="520" aria-valuenow="280"
+                     title="拖曳調整標記框清單寬度；聚焦後可用左右方向鍵調整"></div>
+
+                    <aside class="pinned-boxes" id="pinnedBoxesSidebar" aria-labelledby="pinnedBoxesTitle">
+                        <div class="box-list-header">
+                            <h4 id="pinnedBoxesTitle">標記框清單 (<span id="inspectorBoxCount">0</span>)</h4>
+                        </div>
+                        <div class="box-canvas-tools" role="toolbar" aria-label="標記框新增與複製工具">
+                            <div class="box-action-btns-row">
+                                <button type="button" id="btnToggleDrawBox" class="btn-xs btn-draw-box" aria-pressed="false" onclick="toggleDrawBoxMode()" title="在畫布上按住滑鼠左鍵拖曳拉出新標記框，放開後立即輸入新類別名稱 (快捷鍵 W)">
+                                    ＋ 新增框 (W)
+                                </button>
+                                <button type="button" id="btnDuplicateSelectedBox" class="btn-xs" style="display: none;" onclick="duplicateSelectedBoxOnCanvas()" title="複製目前選取的標記框 (快捷鍵 B)">
+                                    複製框 (B)
+                                </button>
+                                <button type="button" id="btnDeleteSelectedBox" class="btn-xs btn-danger-outline" style="display: none;" onclick="deleteSelectedBoxOnCanvas()" title="刪除目前選取的標記框 (快捷鍵 Del)">
+                                    刪除 (Del)
+                                </button>
+                            </div>
+                        </div>
+                        <div id="itemBoxesList" class="boxes-scroll-list"></div>
+                    </aside>
+
+                <!-- 右側：可收合的標記框與詳細診斷欄 -->
+                <aside class="review-right-sidebar collapsed" id="reviewRightSidebar" aria-label="照片詳細資訊">
+                    <button class="btn btn-secondary btn-sm close-review-sidebar" onclick="toggleReviewSidebar('right', this)">關閉詳細資訊</button>
+                    <div class="sidebar-card">
+                        <h4>目前照片狀態</h4>
+                        <div id="itemMetaDetails" class="meta-rows"></div>
+                    </div>
+
+                    <div class="sidebar-card">
+                        <h4>格式檢查</h4>
+                        <div id="itemIssuesList" class="issues-rows"></div>
+                    </div>
+
+                </aside>
+            </div>
+        </section>
+
+    </main>
+<div id="pathSettingsModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-label="路徑設定" style="display:none"><div class="modal-dialog modal-lg"><div id="loadSettingsPanel" class="surface-card settings-collapse-card" >
+                        <div class="card-section-header">
+                            <h3>路徑設定</h3>
+                            <button class="btn-xs btn-close" onclick="closeModal('pathSettingsModal')">關閉</button>
+                        </div>
+                        <div class="settings-grid">
+                            <div class="field-row">
+                                <label>照片資料夾：</label>
+                                <input type="text" id="inputImageDirLoaded" class="form-input" placeholder="照片資料夾路徑">
+                                <button class="btn btn-secondary" onclick="pickPath('inputImageDirLoaded', 'folder')">選擇資料夾...</button>
+                                <button class="btn btn-ghost" onclick="openInExplorer('inputImageDirLoaded')">開啟資料夾</button>
+                            </div>
+                            <div class="field-row">
+                                <label class="checkbox-inline">
+                                    <input type="checkbox" id="chkSameFolder" checked onchange="toggleSameFolderMode()">
+                                    <span>照片與標記放在同一資料夾</span>
+                                </label>
+                            </div>
+                            <div class="field-row" id="separateLabelDirGroup" style="display: none;">
+                                <label>獨立標記檔資料夾：</label>
+                                <input type="text" id="inputLabelDir" class="form-input" placeholder="若標記檔分開存放請指定路徑">
+                                <button class="btn btn-secondary" onclick="pickPath('inputLabelDir', 'folder')">選擇...</button>
+                            </div>
+                            <div class="field-row">
+                                <label>類別檔 (classes.txt)：</label>
+                                <input type="text" id="inputClassesPath" class="form-input" placeholder="自動於資料夾內尋找 classes.txt">
+                                <button class="btn btn-secondary" onclick="pickPath('inputClassesPath', 'file')">指定檔案...</button>
+                            </div>
+                            <div class="field-row">
+                                <button class="btn btn-primary" onclick="rescanFromLoadedSettings()">重新掃描資料夾</button>
+                                
+                            </div>
+                        </div>
+                    </div></div></div>
+
+    <!-- ==================================================================
+         輔助工具彈窗 1：類別修正
+         ================================================================== -->
+    <div id="remapModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="remapModalTitle" style="display: none;" onclick="if(event.target===this) closeModal('remapModal')">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-header">
+                <div>
+                    <h3 id="remapModalTitle">類別修正</h3>
+                    <p class="subtitle remap-intro">可直接修改類別名稱、將重複類別合併，或刪除特定類別的所有標記框（標記框座標不會改變，修改前自動備份）。</p>
+                </div>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('remapModal')">✕</button>
+            </div>
+            <div class="modal-body">
+                <div id="classRemapEditorWrap" class="spacious-table-wrap remap-table-wrap"></div>
+                <div id="classRemapResult" class="remap-result" aria-live="polite"></div>
+                <div id="classRemapPreviewBox" class="remap-preview-banner" aria-live="polite"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('remapModal')">取消</button>
+                <button class="btn btn-primary" id="btnExecRemap" onclick="executeClassRemapOperation()" disabled>儲存並套用修正</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==================================================================
+         輔助工具彈窗 4：快捷鍵說明
+         ================================================================== -->
+    <div id="shortcutModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="shortcutModalTitle" style="display: none;" onclick="if(event.target===this) closeModal('shortcutModal')">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 id="shortcutModalTitle">快捷鍵</h3>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('shortcutModal')">✕</button>
+            </div>
+            <div class="modal-body">
+
+                <table class="shortcut-table">
+                    <thead>
+                        <tr>
+                            <th>按鍵 / 操作</th>
+                            <th>功能說明</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><kbd>C</kbd></td>
+                            <td><strong>確認並下一張</strong>（儲存並確認目前照片，自動跳至下一張）</td>
+                        </tr>
+                        
+                        <tr>
+                            <td><kbd>A</kbd> / <kbd>D</kbd></td>
+                            <td>切換上一張 / 下一張照片</td>
+                        </tr>
+                        <tr>
+                            <td><strong>滑鼠拖曳標記框</strong></td>
+                            <td>點擊標記框可拖曳平移位置，或拉動<strong>四角與上下左右四邊中點共 8 個白色控制點</strong>調整尺寸（放開滑鼠自動儲存並建立備份）</td>
+                        </tr>
+                        <tr>
+                            <td><kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd></td>
+                            <td><strong>像素級微調標記框位置</strong>（選取標記框後，按方向鍵每次微調 1px；按住 <kbd>Shift</kbd> + 方向鍵每次微調 10px）</td>
+                        </tr>
+                        <tr>
+                            <td><kbd>W</kbd></td>
+                            <td>切換<strong>「＋ 新增框」</strong>模式，於畫布拖曳拉出標記框後立即輸入新類別名稱並自動追加類別 ID（按 <kbd>Esc</kbd> 取消）</td>
+                        </tr>
+                        <tr>
+                            <td><kbd>B</kbd></td>
+                            <td><strong>複製選取框</strong>（將目前選取的標記框複製一份並自動儲存）</td>
+                        </tr>
+                        <tr>
+                            <td><kbd>Delete</kbd> / <kbd>Backspace</kbd></td>
+                            <td>刪除畫布上目前選取的標記框</td>
+                        </tr>
+                        <tr>
+                            <td><kbd>V</kbd></td>
+                            <td>切換檢視模式（單張檢視 ↔ 並排比較）</td>
+                        </tr>
+                        <tr>
+                            <td><kbd>Space</kbd> (空白鍵)</td>
+                            <td>照片卡片有焦點時：切換選取；檢視畫布時：設為批次參考</td>
+                        </tr>
+                        <tr>
+                            <td><kbd>Ctrl</kbd> + <kbd>Z</kbd></td>
+                            <td><strong>還原上一步</strong>（同頁首「↩ 還原上一步」；在輸入框內仍為文字復原）</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 新增標記框：詢問類別名稱彈窗 -->
+    <div id="newBoxClassModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="newBoxClassModalTitle" style="display: none;" onclick="if(event.target===this) cancelNewBoxClassModal()">
+        <div class="modal-dialog modal-sm">
+            <div class="modal-header">
+                <div>
+                    <h3 id="newBoxClassModalTitle">輸入新標記框的類別名稱</h3>
+                    <p class="subtitle" id="newBoxClassIdPreview">將建立新類別並自動追加 ID 至 classes.txt</p>
+                </div>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="cancelNewBoxClassModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="new-box-class-form">
+                    <label for="inputNewBoxClassName" class="box-tool-label">新類別名稱：</label>
+                    <input type="text" id="inputNewBoxClassName" class="form-input" placeholder="請輸入新類別名稱（按 Enter 確認）" oninput="updateNewBoxClassPreview()" onkeydown="handleNewBoxClassInputKey(event)">
+                    <div id="existingClassesQuickWrap" class="existing-classes-quick-wrap" style="display: none;">
+                        <span class="box-tool-label">或點選既有類別：</span>
+                        <div id="existingClassesQuickList" class="existing-classes-chips"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="cancelNewBoxClassModal()">取消 (Esc)</button>
+                <button type="button" class="btn btn-primary" onclick="confirmNewBoxClassModal()">確定新增 (Enter)</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 資料夾完整路徑彈窗 -->
+    <div id="folderDetailModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="folderDetailModalTitle" style="display: none;" onclick="if(event.target===this) closeModal('folderDetailModal')">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 id="folderDetailModalTitle">專案資料夾</h3>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('folderDetailModal')">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="meta-rows">
+                    <div><strong>照片資料夾完整路徑：</strong><br><code id="detailFullImageDir"></code></div>
+                    <div style="margin-top:8px;"><strong>標記檔資料夾完整路徑：</strong><br><code id="detailFullLabelDir"></code></div>
+                    <div style="margin-top:8px;"><strong>類別定義檔 (classes.txt)：</strong><br><code id="detailFullClassesPath"></code></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="openInExplorer('detailFullImageDir')">在檔案總管開啟</button>
+                <button class="btn btn-primary" onclick="closeModal('folderDetailModal'); switchStep('load'); toggleLoadSettingsPanel(true);">更換資料夾</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script>window.YOLO_WEB_MODE = true;</script>
+    <script src="./static/js/web_fs_engine.js"></script>
+    <script src="./static/js/main.js"></script>
+</body>
+</html>
