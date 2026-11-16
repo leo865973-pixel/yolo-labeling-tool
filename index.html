@@ -17,21 +17,21 @@
             <h1 class="app-title" title="GitHub Pages 網頁版">AI 影像標記工具</h1>
             <div id="headerFolderBox" class="folder-indicator" style="display: none;">
                 <span class="folder-label">目前資料夾：</span>
-                <button class="folder-name-btn" id="headerFolderName" onclick="toggleFolderDetailModal()" title="點擊查看完整路徑"></button>
-                <button class="btn-xs" style="margin-left:6px;background:#2874A6;color:#fff;border-color:#3498DB;" onclick="pickAndLoadFolder()" title="直接選擇並載入您的正式照片資料夾">選擇照片資料夾</button>
+                <button class="folder-name-btn" id="headerFolderName" onclick="toggleFolderDetailModal()"></button>
+                <button class="btn-xs" style="margin-left:6px;background:#2874A6;color:#fff;border-color:#3498DB;" onclick="pickAndLoadFolder()">選擇照片資料夾</button>
             </div>
         </div>
 
         <!-- 右側輔助工具列（不強迫依序經過） -->
         <div class="header-actions">
-            <button class="util-btn util-undo-btn" id="btnQuickUndo" onclick="handleUndoLast()" disabled title="還原最近一次批次套用、畫布修改或類別修正 (Ctrl+Z)">
+            <button class="util-btn util-undo-btn" id="btnQuickUndo" onclick="handleUndoLast()" disabled>
                 ↩ 還原上一步
             </button>
             <button class="util-btn" onclick="openModal('pathSettingsModal')">路徑設定</button>
-            <button class="util-btn" onclick="openModal('shortcutModal')" title="查看鍵盤快捷鍵 (?)">
+            <button class="util-btn" onclick="openModal('shortcutModal')">
                 快捷鍵說明
             </button>
-            <button class="util-btn util-tour-btn" id="btnLaunchTour" onclick="openGuidedTourLauncher()" title="隨時重新啟動互動式動態操作指引">
+            <button class="util-btn util-tour-btn" id="btnLaunchTour" onclick="openGuidedTourLauncher()">
                 🎓 操作指引
             </button>
         </div>
@@ -45,7 +45,13 @@
             批次套用
             <span id="navBadgeUnlabeled" class="nav-pill" style="display: none;"></span>
         </button>
-        <button class="workspace-nav-btn workspace-nav-tool" id="btnUtilRemap" onclick="openModal('remapModal')" disabled title="修改類別名稱、合併或刪除類別">類別修正</button>
+        <div class="workspace-nav-right-tools">
+            <button type="button" id="sharedClassesStatusPill" class="shared-classes-pill" style="display: none;" onclick="openModal('pathSettingsModal')">
+                <span class="pill-dot"></span>
+                <span id="sharedClassesPillText">共用類別：classes.txt</span>
+            </button>
+            <button class="workspace-nav-btn workspace-nav-tool" id="btnUtilRemap" onclick="openModal('remapModal')" disabled>類別修正</button>
+        </div>
     </nav>
     <div id="workspaceLoadStatus" class="workspace-status" role="status" hidden></div>
 
@@ -77,31 +83,8 @@
                             </div>
                         </div>
 
-                        <ul class="welcome-facts" aria-label="支援內容">
-                            <li>支援 JPG／PNG／BMP／WEBP</li>
-                            <li>YOLO 格式標記檔</li>
-                            <li>修改前自動備份，可還原</li>
-                        </ul>
+                        <p class="welcome-format-hint">支援 JPG／PNG／BMP／WEBP 與 .txt 標記檔</p>
                     </div>
-
-                    <section class="surface-card welcome-flow" aria-label="使用流程">
-                        <h3 class="welcome-flow-title">使用流程</h3>
-                        <ol class="welcome-steps">
-                            <li>
-                                <span class="welcome-step-no">1</span>
-                                <div><strong>載入照片</strong><p>選擇資料夾，檢查標記檔與類別是否完整。</p></div>
-                            </li>
-                            <li>
-                                <span class="welcome-step-no">2</span>
-                                <div><strong>標記檢視</strong><p>逐張確認標記框，可直接拖曳調整，需修正的照片可先標記。</p></div>
-                            </li>
-                            <li>
-                                <span class="welcome-step-no">3</span>
-                                <div><strong>批次套用</strong><p>以已標記的參考照片，為相似的未標記照片建立標記草稿。</p></div>
-                            </li>
-                        </ol>
-                        <p class="welcome-flow-note">批次套用後的標記仍需人工確認，不會自動視為完成。</p>
-                    </section>
                 </div>
 
                 <!-- B. 載入資料後的摘要與下一步引導畫面 -->
@@ -121,6 +104,9 @@
                         </div>
                         <div id="actionHeroButtons" class="action-hero-right"></div>
                     </div>
+
+                    <!-- 共用類別檔情境引導卡片 (首次 / 跨資料夾切換 / 待授權) -->
+                    <div id="sharedClassesLoadGuide" class="shared-classes-guide" style="display: none;"></div>
 
                     <!-- 可收合的更換資料夾與路徑設定區 -->
                     
@@ -192,7 +178,7 @@
                                     <button class="btn btn-ghost btn-sm" onclick="clearAllCopyTargets()">
                                         取消全選
                                     </button>
-                                    <span class="selected-counter-pill">已選 <strong id="copyTargetCount">0</strong> 張</span>
+                                    <span class="selected-counter-pill">已選 <strong id="copyTargetCount">0</strong> / <span id="copyTotalPhotoCount">0</span> 張</span>
                                 </div>
                             </div>
 
@@ -233,9 +219,9 @@
                                     <div id="copyClassFilterCheckboxes" class="class-check-wrap"></div>
                                 </div>
                                 <div class="adv-row">
-                                    <label class="checkbox-inline" title="複製時自動以 ZNCC 演算法比對參考照片局部特徵，自動追蹤物體微幅位移並修正標記框座標">
+                                    <label class="checkbox-inline">
                                         <input type="checkbox" id="chkSmartAlign" checked>
-                                        <span><strong>智慧局部對齊 (ZNCC)</strong>（自動微調偏移的物體座標）</span>
+                                        <span><strong>智慧局部對齊</strong></span>
                                     </label>
                                 </div>
                                 <div class="adv-row">
@@ -247,8 +233,8 @@
                                 <div class="adv-row">
                                     <label class="adv-label">輸出資料夾：</label>
                                     <div class="inline-controls-row" style="flex:1;">
-                                        <input type="text" id="inputCopyOutputDir" class="form-input-sm" aria-label="輸出資料夾" style="flex:1;" placeholder="預設：標記資料夾" oninput="runMasterCopyPreview()">
-                                        <button class="btn-xs" onclick="pickPath('inputCopyOutputDir', 'folder')">選擇...</button>
+                                        <input type="text" id="inputCopyOutputDir" class="form-input-sm" aria-label="輸出資料夾" style="flex:1;" placeholder="預設：目前資料夾" oninput="runMasterCopyPreview()">
+                                        <button class="btn-xs" onclick="pickPath('inputCopyOutputDir', 'folder')">選擇</button>
                                     </div>
                                 </div>
                             </div>
@@ -301,9 +287,9 @@
                     <!-- 畫布頂部精簡狀態與次要檢視工具列 -->
                     <div class="review-top-bar">
                         <div class="top-bar-left">
-                            <button class="btn-xs" aria-controls="reviewLeftSidebar" onclick="toggleReviewSidebar('left', this)" title="收合或展開左側照片清單">☰ 清單</button>
+                            <button class="btn-xs" aria-controls="reviewLeftSidebar" onclick="toggleReviewSidebar('left', this)">☰ 清單</button>
                             <span class="current-file-title" id="reviewCurrentFileName">尚未選取照片</span>
-                            <span class="ref-badge" id="reviewRefBadge" hidden title="批次套用時，會以這張照片的標記框為來源">★ 參考照片</span>
+                            <span class="ref-badge" id="reviewRefBadge" hidden>★ 參考照片</span>
                             <span class="review-position" id="reviewQueueProgress"></span>
                             <!-- 明確儲存狀態指示器（置於顯眼處） -->
                             <button type="button" id="saveStatusIndicator" aria-live="polite" class="save-badge saved" disabled>[✓] 已儲存</button>
@@ -313,15 +299,15 @@
                             <!-- 檢視比較模式切換 -->
                             <div class="compare-mode-group">
                                 <button class="cmp-btn active" aria-pressed="true" data-vmode="single" onclick="setPreviewMode('single')">單張檢視</button>
-                                <button class="cmp-btn" aria-pressed="false" data-vmode="side_by_side" onclick="setPreviewMode('side_by_side')" title="與參考照片並排比較 (V)">並排比較</button>
+                                <button class="cmp-btn" aria-pressed="false" data-vmode="side_by_side" onclick="setPreviewMode('side_by_side')">並排比較</button>
                             </div>
                             <!-- 縮放 -->
                             <div class="zoom-btns" role="group" aria-label="畫面縮放">
-                                <button class="btn-xs" onclick="adjustZoom(0.85)" title="縮小" aria-label="縮小">−</button>
+                                <button class="btn-xs" onclick="adjustZoom(0.85)" aria-label="縮小">−</button>
                                 <span id="zoomLevelText" class="zoom-label" role="status">適應視窗</span>
-                                <button class="btn-xs" onclick="adjustZoom(1.18)" title="放大" aria-label="放大">+</button>
-                                <button class="btn-xs" onclick="resetZoom()" title="回到適應視窗大小">重設縮放</button>
-                                <button type="button" class="btn-xs btn-loupe-toggle active" id="btnToggleLoupe" aria-pressed="true" onclick="toggleMagnifierLoupe()" title="新增框或拖曳控制點時顯示游標處 4 倍貼齊邊緣放大鏡 (快捷鍵 M)">🔍 放大鏡 (M)</button>
+                                <button class="btn-xs" onclick="adjustZoom(1.18)" aria-label="放大">+</button>
+                                <button class="btn-xs" onclick="resetZoom()">重設縮放</button>
+                                <button type="button" class="btn-xs btn-loupe-toggle active" id="btnToggleLoupe" aria-pressed="true" onclick="toggleMagnifierLoupe()">🔍 放大鏡 (M)</button>
                             </div>
                         </div>
 
@@ -329,6 +315,9 @@
                             <button class="btn-xs btn-details-toggle" aria-controls="reviewRightSidebar" aria-expanded="false" onclick="toggleReviewSidebar('right', this)">詳細資訊</button>
                         </div>
                     </div>
+
+                    <!-- 共用類別檔引導與下一步操作橫幅 -->
+                    <div id="sharedClassesGuideBanner" class="shared-classes-guide shared-classes-guide-compact" style="display: none;"></div>
 
                     <!-- 任務全部確認完成時的通知列 -->
                     <div id="queueCompletedBanner" class="queue-complete-banner" style="display: none;"></div>
@@ -374,7 +363,7 @@
                         <!-- 中央主要操作：需修正 vs 確認並下一張 -->
                         <div class="bottom-primary-center">
                             
-                            <button class="btn btn-primary btn-lg" id="btnConfirmAndNext" onclick="confirmCurrentAndNext()" title="確認目前標記位置正確並前往下一張 (快捷鍵 C)">
+                            <button class="btn btn-primary btn-lg" id="btnConfirmAndNext" onclick="confirmCurrentAndNext()">
                                 確認並下一張 (C)
                             </button>
                         </div>
@@ -382,7 +371,7 @@
                         <!-- 右側次要操作：設為參考照片 -->
                         <div class="bottom-secondary-right">
                             <div class="direct-review-actions">
-                            <button class="btn btn-ghost" id="btnSetMaster" onclick="setCurrentAsMaster()" title="將此張已標記照片設為參考照片 (快捷鍵 Space)">
+                            <button class="btn btn-ghost" id="btnSetMaster" onclick="setCurrentAsMaster()">
                                 設為參考
                             </button>
                             </div>
@@ -392,8 +381,7 @@
 
                 <div id="boxListResize" class="photo-list-resize box-list-resize" role="separator" tabindex="0"
                      aria-label="調整標記框清單寬度" aria-controls="pinnedBoxesSidebar" aria-orientation="vertical"
-                     aria-valuemin="220" aria-valuemax="520" aria-valuenow="280"
-                     title="拖曳調整標記框清單寬度；聚焦後可用左右方向鍵調整"></div>
+                     aria-valuemin="220" aria-valuemax="520" aria-valuenow="280"></div>
 
                     <aside class="pinned-boxes" id="pinnedBoxesSidebar" aria-labelledby="pinnedBoxesTitle">
                         <div class="box-list-header">
@@ -401,13 +389,13 @@
                         </div>
                         <div class="box-canvas-tools" role="toolbar" aria-label="標記框新增與複製工具">
                             <div class="box-action-btns-row">
-                                <button type="button" id="btnToggleDrawBox" class="btn-xs btn-draw-box" aria-pressed="false" onclick="toggleDrawBoxMode()" title="在畫布上按住滑鼠左鍵拖曳拉出新標記框，放開後立即輸入新類別名稱 (快捷鍵 W)">
+                                <button type="button" id="btnToggleDrawBox" class="btn-xs btn-draw-box" aria-pressed="false" onclick="toggleDrawBoxMode()">
                                     ＋ 新增框 (W)
                                 </button>
-                                <button type="button" id="btnDuplicateSelectedBox" class="btn-xs" style="display: none;" onclick="duplicateSelectedBoxOnCanvas()" title="複製目前選取的標記框 (快捷鍵 B)">
+                                <button type="button" id="btnDuplicateSelectedBox" class="btn-xs" style="display: none;" onclick="duplicateSelectedBoxOnCanvas()">
                                     複製框 (B)
                                 </button>
-                                <button type="button" id="btnDeleteSelectedBox" class="btn-xs btn-danger-outline" style="display: none;" onclick="deleteSelectedBoxOnCanvas()" title="刪除目前選取的標記框 (快捷鍵 Del)">
+                                <button type="button" id="btnDeleteSelectedBox" class="btn-xs btn-danger-outline" style="display: none;" onclick="deleteSelectedBoxOnCanvas()">
                                     刪除 (Del)
                                 </button>
                             </div>
@@ -433,40 +421,55 @@
         </section>
 
     </main>
-<div id="pathSettingsModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-label="路徑設定" style="display:none"><div class="modal-dialog modal-lg"><div id="loadSettingsPanel" class="surface-card settings-collapse-card" >
-                        <div class="card-section-header">
-                            <h3>路徑設定</h3>
-                            <button class="btn-xs btn-close" onclick="closeModal('pathSettingsModal')">關閉</button>
+    <div id="pathSettingsModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="pathSettingsModalTitle" style="display:none" onclick="if(event.target===this) closeModal('pathSettingsModal')">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-header">
+                <h3 id="pathSettingsModalTitle">路徑設定</h3>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('pathSettingsModal')">✕</button>
+            </div>
+            <div class="modal-body" id="loadSettingsPanel">
+                <div class="settings-grid">
+                    <div class="field-row">
+                        <label for="inputImageDirLoaded">資料夾：</label>
+                        <input type="text" id="inputImageDirLoaded" class="form-input" placeholder="照片與標記檔所在的資料夾路徑">
+                        <button type="button" class="btn btn-secondary" onclick="pickPath('inputImageDirLoaded', 'folder')">更換資料夾</button>
+                        <button type="button" class="btn btn-ghost" onclick="openInExplorer('inputImageDirLoaded')">開啟位置</button>
+                    </div>
+                    <div class="field-row">
+                        <label for="inputClassesPath">類別檔：</label>
+                        <input type="text" id="inputClassesPath" class="form-input" placeholder="自動使用資料夾內的 classes.txt">
+                    </div>
+
+                    <div class="path-shared-box">
+                        <div class="path-shared-head">
+                            <strong>多資料夾共用類別 (classes.txt)</strong>
                         </div>
-                        <div class="settings-grid">
-                            <div class="field-row">
-                                <label>照片資料夾：</label>
-                                <input type="text" id="inputImageDirLoaded" class="form-input" placeholder="照片資料夾路徑">
-                                <button class="btn btn-secondary" onclick="pickPath('inputImageDirLoaded', 'folder')">選擇資料夾...</button>
-                                <button class="btn btn-ghost" onclick="openInExplorer('inputImageDirLoaded')">開啟資料夾</button>
+                        <div class="path-shared-actions">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="pickSharedClassesFile()">📄 挑選現有類別檔</button>
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="createSharedClassesFile()">✨ 新建共用類別檔</button>
+                        </div>
+                        <div id="sharedClassesOptionsRow" class="shared-classes-options-row" style="display: none;">
+                            <div class="shared-options-info">
+                                <span id="sharedClassesBindingBadge" class="badge badge-info">已綁定共用類別檔</span>
+                                <span id="sharedClassesBindingPath" class="muted-text"></span>
                             </div>
-                            <div class="field-row">
+                            <div class="shared-options-actions">
                                 <label class="checkbox-inline">
-                                    <input type="checkbox" id="chkSameFolder" checked onchange="toggleSameFolderMode()">
-                                    <span>照片與標記放在同一資料夾</span>
+                                    <input type="checkbox" id="chkLockSharedClasses" onchange="toggleLockSharedClasses(this.checked)">
+                                    優先使用共用檔（略過本機舊檔）
                                 </label>
-                            </div>
-                            <div class="field-row" id="separateLabelDirGroup" style="display: none;">
-                                <label>獨立標記檔資料夾：</label>
-                                <input type="text" id="inputLabelDir" class="form-input" placeholder="若標記檔分開存放請指定路徑">
-                                <button class="btn btn-secondary" onclick="pickPath('inputLabelDir', 'folder')">選擇...</button>
-                            </div>
-                            <div class="field-row">
-                                <label>類別檔 (classes.txt)：</label>
-                                <input type="text" id="inputClassesPath" class="form-input" placeholder="自動於資料夾內尋找 classes.txt">
-                                <button class="btn btn-secondary" onclick="pickPath('inputClassesPath', 'file')">指定檔案...</button>
-                            </div>
-                            <div class="field-row">
-                                <button class="btn btn-primary" onclick="rescanFromLoadedSettings()">重新掃描資料夾</button>
-                                
+                                <button type="button" class="btn btn-xs btn-secondary" onclick="clearSharedClassesBinding()">解除共用</button>
                             </div>
                         </div>
-                    </div></div></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('pathSettingsModal')">取消</button>
+                <button type="button" class="btn btn-primary" onclick="rescanFromLoadedSettings()">重新掃描</button>
+            </div>
+        </div>
+    </div>
 
     <!-- ==================================================================
          輔助工具彈窗 1：類別修正
@@ -474,13 +477,11 @@
     <div id="remapModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="remapModalTitle" style="display: none;" onclick="if(event.target===this) closeModal('remapModal')">
         <div class="modal-dialog modal-xl">
             <div class="modal-header">
-                <div>
-                    <h3 id="remapModalTitle">類別修正</h3>
-                    <p class="subtitle remap-intro">可直接修改類別名稱、將重複類別合併，或刪除特定類別的所有標記框（標記框座標不會改變，修改前自動備份）。</p>
-                </div>
+                <h3 id="remapModalTitle">類別修正</h3>
                 <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('remapModal')">✕</button>
             </div>
             <div class="modal-body">
+                <div id="remapSharedClassesWarning" class="remap-shared-warning" style="display: none;" role="alert"></div>
                 <div id="classRemapEditorWrap" class="spacious-table-wrap remap-table-wrap"></div>
                 <div id="classRemapResult" class="remap-result" aria-live="polite"></div>
                 <div id="classRemapPreviewBox" class="remap-preview-banner" aria-live="polite"></div>
@@ -513,48 +514,47 @@
                     <tbody>
                         <tr>
                             <td><kbd>C</kbd></td>
-                            <td><strong>確認並下一張</strong>（儲存並確認目前照片，自動跳至下一張）</td>
+                            <td>確認並下一張</td>
                         </tr>
-                        
                         <tr>
                             <td><kbd>A</kbd> / <kbd>D</kbd></td>
-                            <td>切換上一張 / 下一張照片</td>
+                            <td>上一張 / 下一張照片</td>
                         </tr>
                         <tr>
                             <td><strong>滑鼠拖曳標記框</strong></td>
-                            <td>點擊標記框可拖曳平移位置，或拉動<strong>四角與上下左右四邊中點共 8 個白色控制點</strong>調整尺寸（編輯時零延遲即時預覽；按 <kbd>C</kbd> 確認後正式存檔並建立備份，切換照片亦自動存為草稿）</td>
+                            <td>移動位置或拉白點縮放（按 <kbd>C</kbd> 儲存）</td>
                         </tr>
                         <tr>
                             <td><kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd></td>
-                            <td><strong>像素級微調標記框位置</strong>（選取標記框後，按方向鍵每次微調 1px；按住 <kbd>Shift</kbd> + 方向鍵每次微調 10px）</td>
+                            <td>微調 1 像素（加 <kbd>Shift</kbd> 為 10 像素）</td>
                         </tr>
                         <tr>
                             <td><kbd>W</kbd></td>
-                            <td>切換<strong>「＋ 新增框」</strong>模式，於畫布拖曳拉出標記框後立即輸入新類別名稱並自動追加類別 ID（按 <kbd>Esc</kbd> 取消）</td>
+                            <td>新增標記框</td>
                         </tr>
                         <tr>
                             <td><kbd>M</kbd></td>
-                            <td>切換<strong>「🔍 貼齊邊緣放大鏡」</strong>（於新增框或拉動 8 點控制點時，顯示游標處 4 倍像素級放大鏡與十字準星）</td>
+                            <td>開啟／關閉放大鏡</td>
                         </tr>
                         <tr>
                             <td><kbd>B</kbd></td>
-                            <td><strong>複製選取框</strong>（將目前選取的標記框複製一份並自動儲存）</td>
+                            <td>複製選取框</td>
                         </tr>
                         <tr>
                             <td><kbd>Delete</kbd> / <kbd>Backspace</kbd></td>
-                            <td>刪除畫布上目前選取的標記框</td>
+                            <td>刪除選取框</td>
                         </tr>
                         <tr>
                             <td><kbd>V</kbd></td>
-                            <td>切換檢視模式（單張檢視 ↔ 並排比較）</td>
+                            <td>單張檢視 ／ 並排比較</td>
                         </tr>
                         <tr>
                             <td><kbd>Space</kbd> (空白鍵)</td>
-                            <td>照片卡片有焦點時：切換選取；檢視畫布時：設為批次參考</td>
+                            <td>勾選照片 ／ 設為參考</td>
                         </tr>
                         <tr>
                             <td><kbd>Ctrl</kbd> + <kbd>Z</kbd></td>
-                            <td><strong>還原上一步</strong>（同頁首「↩ 還原上一步」；在輸入框內仍為文字復原）</td>
+                            <td>還原上一步</td>
                         </tr>
                     </tbody>
                 </table>
@@ -568,7 +568,7 @@
             <div class="modal-header">
                 <div>
                     <h3 id="newBoxClassModalTitle">輸入新標記框的類別名稱</h3>
-                    <p class="subtitle" id="newBoxClassIdPreview">將建立新類別並自動追加 ID 至 classes.txt</p>
+                    <p class="subtitle" id="newBoxClassIdPreview"></p>
                 </div>
                 <button class="btn-close" aria-label="關閉彈窗" onclick="cancelNewBoxClassModal()">✕</button>
             </div>
@@ -584,7 +584,7 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" onclick="cancelNewBoxClassModal()">取消 (Esc)</button>
-                <button type="button" class="btn btn-primary" onclick="confirmNewBoxClassModal()">確定新增 (Enter)</button>
+                <button type="button" class="btn btn-primary" onclick="confirmNewBoxClassModal()">確定 (Enter)</button>
             </div>
         </div>
     </div>
@@ -598,14 +598,30 @@
             </div>
             <div class="modal-body">
                 <div class="meta-rows">
-                    <div><strong>照片資料夾完整路徑：</strong><br><code id="detailFullImageDir"></code></div>
-                    <div style="margin-top:8px;"><strong>標記檔資料夾完整路徑：</strong><br><code id="detailFullLabelDir"></code></div>
-                    <div style="margin-top:8px;"><strong>類別定義檔 (classes.txt)：</strong><br><code id="detailFullClassesPath"></code></div>
+                    <div><strong>資料夾完整路徑：</strong><br><code id="detailFullImageDir"></code></div>
+                    <div style="margin-top:8px;"><strong>類別檔 (classes.txt)：</strong><br><code id="detailFullClassesPath"></code></div>
                 </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="openInExplorer('detailFullImageDir')">在檔案總管開啟</button>
                 <button class="btn btn-primary" onclick="closeModal('folderDetailModal'); switchStep('load'); toggleLoadSettingsPanel(true);">更換資料夾</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 尚未建立 classes.txt / 共用類別決策放大引導彈窗 -->
+    <div id="sharedClassesSetupModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="sharedSetupModalTitle" style="display: none;" onclick="if(event.target===this) dismissSharedClassesGuide()">
+        <div class="modal-dialog modal-xl shared-setup-dialog">
+            <div class="modal-header shared-setup-header" id="sharedSetupHeader">
+                <div>
+                    <h3 id="sharedSetupModalTitle">尚未建立類別檔 (classes.txt)</h3>
+                    <p class="subtitle shared-setup-subtitle" id="sharedSetupSubtitle"></p>
+                </div>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="dismissSharedClassesGuide()">✕</button>
+            </div>
+            <div class="modal-body shared-setup-body" id="sharedSetupBody"></div>
+            <div class="modal-footer shared-setup-footer" id="sharedSetupFooter">
+                <button type="button" class="btn btn-ghost" onclick="dismissSharedClassesGuide()">先略過</button>
             </div>
         </div>
     </div>
@@ -642,40 +658,34 @@
     <div id="guidedTourLauncherModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="tourLauncherTitle" style="display: none;" onclick="if(event.target===this) closeModal('guidedTourLauncherModal')">
         <div class="modal-dialog">
             <div class="modal-header">
-                <div>
-                    <h3 id="tourLauncherTitle">🎓 互動式動態操作指引</h3>
-                    <p class="subtitle">選擇要查看的項目，將直接對應畫面位置逐步引導操作</p>
-                </div>
+                <h3 id="tourLauncherTitle">🎓 操作指引</h3>
                 <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('guidedTourLauncherModal')">✕</button>
             </div>
             <div class="modal-body">
                 <div class="tour-launcher-cards">
                     <div class="tour-launcher-card">
                         <div class="tour-launcher-card-info">
-                            <span class="badge badge-info">指引一 · 共 6 步</span>
+                            <span class="badge badge-info">6 步驟</span>
                             <h4>標記檢視操作指引</h4>
-                            <p>認識工作區切換、照片篩選、畫布拉框微調與確認流程。</p>
+                            <p>切換、篩選、畫框微調與確認流程</p>
                         </div>
                         <button type="button" class="btn btn-primary" onclick="startGuidedTourFromLauncher('post_load')">
-                            開始此指引
+                            開始指引
                         </button>
                     </div>
                     <div class="tour-launcher-card">
                         <div class="tour-launcher-card-info">
-                            <span class="badge badge-ok">指引二 · 共 4 步</span>
+                            <span class="badge badge-ok">4 步驟</span>
                             <h4>批次套用操作指引</h4>
-                            <p>認識如何選取參考照片、勾選套用目標、調整設定並建立標記草稿。</p>
+                            <p>參考照片、相似篩選與建立草稿</p>
                         </div>
                         <button type="button" class="btn btn-primary" onclick="startGuidedTourFromLauncher('batch_apply')">
-                            開始此指引
+                            開始指引
                         </button>
                     </div>
                 </div>
             </div>
-            <div class="modal-footer" style="justify-content: space-between;">
-                <button type="button" class="btn btn-ghost btn-sm" onclick="resetGuidedTourDailyState()">
-                    重設「今日不再顯示」設定
-                </button>
+            <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" onclick="closeModal('guidedTourLauncherModal')">關閉</button>
             </div>
         </div>
@@ -701,7 +711,6 @@
             <div class="guided-tour-footer">
                 <div class="guided-tour-footer-left">
                     <button type="button" class="btn btn-ghost btn-sm" id="btnTourSkip" onclick="endGuidedTour('skipped')">略過</button>
-                    <button type="button" class="btn-link tour-inline-hide-btn" id="btnTourHideTodayInline" onclick="markCurrentTourHideToday()">今日不再顯示</button>
                 </div>
                 <div class="guided-tour-footer-right">
                     <button type="button" class="btn btn-secondary btn-sm" id="btnTourPrev" onclick="stepGuidedTour(-1)">← 上一步</button>

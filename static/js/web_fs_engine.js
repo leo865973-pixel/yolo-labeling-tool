@@ -383,6 +383,18 @@
         }
     }
 
+    async function deleteRecentHandleFromIdb(key) {
+        try {
+            const db = await openHandlesDb();
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction(IDB_STORE, 'readwrite');
+                tx.objectStore(IDB_STORE).delete(key);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        } catch (_) {}
+    }
+
     // ========================================================================
     // 4. 資料夾存取供應器：NativeFsProvider (本機真實資料夾) 與 MemoryFsProvider (內建範例)
     // ========================================================================
@@ -711,6 +723,130 @@
     const dirProviders = new Map(); // virtualPath -> NativeFsProvider | MemoryFsProvider
     const customClassesFileHandles = new Map(); // virtualFilePath -> { name, handle }
 
+    const SHARED_CLASSES_IDB_KEY = 'shared_classes_entry';
+    let sharedClassesState = {
+        loaded: false,
+        handle: null,
+        name: '',
+        vPath: '',
+        lockOverride: false,
+        boundWorkspaces: []
+    };
+
+    async function ensureSharedClassesLoadedFromIdb() {
+        if (sharedClassesState.loaded) return;
+        sharedClassesState.loaded = true;
+        const saved = await loadRecentHandleFromIdb(SHARED_CLASSES_IDB_KEY);
+        if (saved && saved.handle) {
+            const vPath = `[共用類別檔] ${saved.name || saved.handle.name || 'classes.txt'}`;
+            sharedClassesState.handle = saved.handle;
+            sharedClassesState.name = saved.name || saved.handle.name || 'classes.txt';
+            sharedClassesState.vPath = vPath;
+            sharedClassesState.lockOverride = Boolean(saved.lockOverride);
+            sharedClassesState.boundWorkspaces = Array.isArray(saved.boundWorkspaces) ? saved.boundWorkspaces : [];
+            customClassesFileHandles.set(vPath, { name: sharedClassesState.name, handle: saved.handle });
+        }
+    }
+
+    async function clearSharedClassesStateAndIdb() {
+        const oldVPath = sharedClassesState.vPath;
+        if (oldVPath) customClassesFileHandles.delete(oldVPath);
+        if (activeState.classesPath && (activeState.classesPath === oldVPath || activeState.classesPath.startsWith('[共用類別檔]'))) {
+            activeState.classesPath = '';
+        }
+        sharedClassesState.loaded = true;
+        sharedClassesState.handle = null;
+        sharedClassesState.name = '';
+        sharedClassesState.vPath = '';
+        sharedClassesState.lockOverride = false;
+        sharedClassesState.boundWorkspaces = [];
+        await deleteRecentHandleFromIdb(SHARED_CLASSES_IDB_KEY);
+    }
+
+    async function persistSharedClassesToIdb() {
+        if (!sharedClassesState.handle) {
+            await deleteRecentHandleFromIdb(SHARED_CLASSES_IDB_KEY);
+            return;
+        }
+        await saveRecentHandleToIdb(SHARED_CLASSES_IDB_KEY, {
+            handle: sharedClassesState.handle,
+            name: sharedClassesState.name,
+            vPath: sharedClassesState.vPath,
+            lockOverride: Boolean(sharedClassesState.lockOverride),
+            boundWorkspaces: Array.isArray(sharedClassesState.boundWorkspaces) ? [...sharedClassesState.boundWorkspaces] : []
+        });
+    }
+
+    function bindExternalClassesHandle(fh, options = {}) {
+        const vPath = `[共用類別檔] ${fh.name}`;
+        customClassesFileHandles.set(vPath, { name: fh.name, handle: fh });
+        sharedClassesState.loaded = true;
+        sharedClassesState.handle = fh;
+        sharedClassesState.name = fh.name;
+        sharedClassesState.vPath = vPath;
+        if ('lockOverride' in options) {
+            sharedClassesState.lockOverride = Boolean(options.lockOverride);
+        }
+        const boundSet = new Set(Array.isArray(sharedClassesState.boundWorkspaces) ? sharedClassesState.boundWorkspaces : []);
+        if (activeState.imageProvider && !activeState.imageProvider.isMemory) {
+            boundSet.add(activeState.imageProvider.virtualPath);
+        }
+        if (Array.isArray(options.extraBoundPaths)) {
+            options.extraBoundPaths.forEach(p => { if (p) boundSet.add(p); });
+        }
+        sharedClassesState.boundWorkspaces = Array.from(boundSet);
+        return vPath;
+    }
+
+    function resolveExternalClassesHandle(classesInfo) {
+        if (!classesInfo || !classesInfo.is_shared_external) return null;
+        if (classesInfo.path && customClassesFileHandles.has(classesInfo.path)) {
+            return customClassesFileHandles.get(classesInfo.path).handle;
+        }
+        return sharedClassesState.handle || null;
+    }
+
+    async function readActiveClassesText(classesInfo, labelProvider) {
+        const extHandle = resolveExternalClassesHandle(classesInfo);
+        if (extHandle) {
+            try {
+                const file = await extHandle.getFile();
+                const buf = await file.arrayBuffer();
+                const decoded = decodeBytesWithFallback(new Uint8Array(buf));
+                return { exists: true, isExternal: true, text: decoded.text };
+            } catch (_) {
+                return { exists: false, isExternal: true, text: '' };
+            }
+        }
+        const classesFilename = classesInfo.filename || 'classes.txt';
+        if (await labelProvider.fileExists(classesFilename)) {
+            const oldCls = await labelProvider.readTextFile(classesFilename);
+            return { exists: true, isExternal: false, text: oldCls.text };
+        }
+        return { exists: false, isExternal: false, text: '' };
+    }
+
+    async function writeActiveClassesText(classesInfo, labelProvider, clsContent) {
+        const extHandle = resolveExternalClassesHandle(classesInfo);
+        if (extHandle) {
+            if (typeof extHandle.queryPermission === 'function') {
+                const perm = await extHandle.queryPermission({ mode: 'readwrite' });
+                if (perm !== 'granted' && typeof extHandle.requestPermission === 'function') {
+                    const reqPerm = await extHandle.requestPermission({ mode: 'readwrite' });
+                    if (reqPerm !== 'granted') {
+                        throw new Error('未取得外部共用 classes.txt 的寫入授權，請點選允許後再試。');
+                    }
+                }
+            }
+            const writable = await extHandle.createWritable();
+            await writable.write(clsContent);
+            await writable.close();
+            return;
+        }
+        const classesFilename = classesInfo.filename || 'classes.txt';
+        await labelProvider.writeTextFile(classesFilename, clsContent);
+    }
+
     let activeState = {
         workspaceId: '',
         imageProvider: null,
@@ -742,6 +878,11 @@
     // 6. 1:1 移植 core/scanner.py
     // ========================================================================
     async function parseClassesFromProvider(labelProvider, imageProvider, explicitClassesPath) {
+        const isMemoryWs = Boolean(labelProvider?.isMemory || imageProvider?.isMemory);
+        if (!isMemoryWs) {
+            await ensureSharedClassesLoadedFromIdb();
+        }
+
         const candidateFiles = [];
         const seen = new Set();
         for (const prov of [labelProvider, imageProvider]) {
@@ -761,18 +902,97 @@
         let resolvedPath = explicitClassesPath || '';
         let fileData = null;
         let filename = 'classes.txt';
+        let isSharedExternal = false;
+        let sharedNeedsPermission = false;
+        let sharedMissingFile = false;
+        let lastSharedAvailable = false;
+        let lastSharedName = '';
+
+        const curDirVPath = imageProvider ? imageProvider.virtualPath : '';
+        const isBoundDir = !isMemoryWs && curDirVPath && Array.isArray(sharedClassesState.boundWorkspaces) &&
+            sharedClassesState.boundWorkspaces.includes(curDirVPath);
+        const relatesToShared = Boolean(!isMemoryWs && sharedClassesState.handle &&
+            (sharedClassesState.lockOverride || isBoundDir));
 
         if (resolvedPath && customClassesFileHandles.has(resolvedPath)) {
             const custom = customClassesFileHandles.get(resolvedPath);
             filename = custom.name;
+            isSharedExternal = true;
             try {
                 const file = await custom.handle.getFile();
                 const buf = await file.arrayBuffer();
                 fileData = decodeBytesWithFallback(new Uint8Array(buf));
             } catch (err) {
-                fileData = { error: err.message };
+                if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
+                    sharedNeedsPermission = true;
+                    fileData = { error: err.message };
+                } else if (err && err.name === 'NotFoundError') {
+                    sharedMissingFile = true;
+                    isSharedExternal = false;
+                    resolvedPath = '';
+                    fileData = null;
+                    await clearSharedClassesStateAndIdb();
+                } else {
+                    fileData = { error: err.message };
+                }
             }
-        } else {
+        } else if (!resolvedPath && relatesToShared) {
+            let perm = 'granted';
+            if (typeof sharedClassesState.handle.queryPermission === 'function') {
+                try {
+                    perm = await sharedClassesState.handle.queryPermission({ mode: 'readwrite' });
+                } catch (_) {
+                    perm = 'prompt';
+                }
+            }
+            if (perm === 'granted') {
+                resolvedPath = sharedClassesState.vPath || `[共用類別檔] ${sharedClassesState.name}`;
+                filename = sharedClassesState.name || sharedClassesState.handle.name || 'classes.txt';
+                isSharedExternal = true;
+                customClassesFileHandles.set(resolvedPath, { name: filename, handle: sharedClassesState.handle });
+                if (activeState.classesPath === '') activeState.classesPath = resolvedPath;
+                try {
+                    const file = await sharedClassesState.handle.getFile();
+                    const buf = await file.arrayBuffer();
+                    fileData = decodeBytesWithFallback(new Uint8Array(buf));
+                } catch (err) {
+                    if (err && err.name === 'NotFoundError') {
+                        sharedMissingFile = true;
+                        isSharedExternal = false;
+                        resolvedPath = '';
+                        fileData = null;
+                        await clearSharedClassesStateAndIdb();
+                    } else {
+                        fileData = { error: err.message };
+                    }
+                }
+            } else {
+                sharedNeedsPermission = true;
+            }
+        } else if (!resolvedPath && !isMemoryWs && sharedClassesState.handle && candidateFiles.length === 0) {
+            let stillExists = true;
+            if (typeof sharedClassesState.handle.queryPermission === 'function') {
+                try {
+                    const perm = await sharedClassesState.handle.queryPermission({ mode: 'readwrite' });
+                    if (perm === 'granted' && typeof sharedClassesState.handle.getFile === 'function') {
+                        try {
+                            await sharedClassesState.handle.getFile();
+                        } catch (err) {
+                            if (err && err.name === 'NotFoundError') {
+                                stillExists = false;
+                                await clearSharedClassesStateAndIdb();
+                            }
+                        }
+                    }
+                } catch (_) {}
+            }
+            if (stillExists && sharedClassesState.handle) {
+                lastSharedAvailable = true;
+                lastSharedName = sharedClassesState.name || sharedClassesState.handle.name || 'classes.txt';
+            }
+        }
+
+        if (!isSharedExternal) {
             if (resolvedPath) {
                 const parts = resolvedPath.split('/');
                 filename = parts[parts.length - 1] || 'classes.txt';
@@ -806,6 +1026,12 @@
             classes: [],
             class_map: {},
             candidate_files: candidateFiles,
+            is_shared_external: isSharedExternal,
+            shared_needs_permission: sharedNeedsPermission,
+            shared_missing_file: sharedMissingFile,
+            shared_relates_to_folder: relatesToShared,
+            last_shared_available: lastSharedAvailable,
+            last_shared_name: lastSharedName,
             issues: [],
             status: 'pass'
         };
@@ -1042,7 +1268,7 @@
                     blocking: true,
                     line: lineNum,
                     reason: `第 ${lineNum} 行 (${className}) 標記框寬高超過 1.0 (${w.toFixed(4)}×${h.toFixed(4)})`,
-                    suggestion: '座標未正確正規化，請於畫布拉動控制點縮放進影像範圍內。'
+                    suggestion: '標記框超出照片範圍，請重新拖曳調整進照片內。'
                 });
             }
 
@@ -1711,6 +1937,41 @@
         const wsToken = `webws::${imageProvider.virtualPath}::${labelProvider.virtualPath}`;
         activeState.workspaceId = wsToken;
 
+        const isMemScan = Boolean(imageProvider?.isMemory || labelProvider?.isMemory);
+        const hasFolderBinding = Boolean(
+            sharedClassesState.handle &&
+            (classesInfo.is_shared_external || classesInfo.shared_needs_permission || classesInfo.shared_relates_to_folder)
+        );
+        const sharedClassesPayload = isMemScan ? {
+            has_binding: false,
+            active: false,
+            file_name: '',
+            virtual_path: '',
+            lock_override: false,
+            needs_permission: false,
+            missing_file: false,
+            has_local_classes_file: classesInfo.candidate_files.length > 0,
+            bound_workspaces: [],
+            last_shared_available: false,
+            last_shared_name: ''
+        } : {
+            has_binding: hasFolderBinding,
+            active: Boolean(classesInfo.is_shared_external),
+            file_name: (classesInfo.is_shared_external || hasFolderBinding)
+                ? (classesInfo.is_shared_external ? classesInfo.filename : (sharedClassesState.name || ''))
+                : '',
+            virtual_path: (classesInfo.is_shared_external || hasFolderBinding)
+                ? (classesInfo.is_shared_external ? classesInfo.path : (sharedClassesState.vPath || ''))
+                : '',
+            lock_override: Boolean(sharedClassesState.lockOverride),
+            needs_permission: Boolean(classesInfo.shared_needs_permission),
+            missing_file: Boolean(classesInfo.shared_missing_file),
+            has_local_classes_file: classesInfo.candidate_files.length > 0,
+            bound_workspaces: Array.isArray(sharedClassesState.boundWorkspaces) ? [...sharedClassesState.boundWorkspaces] : [],
+            last_shared_available: Boolean(classesInfo.last_shared_available),
+            last_shared_name: classesInfo.last_shared_name || ''
+        };
+
         return {
             ok: true,
             workspace_id: wsToken,
@@ -1725,6 +1986,7 @@
             classes_file_exists: classesInfo.exists,
             candidate_class_files: classesInfo.candidate_files,
             classes_info: classesInfo,
+            shared_classes_info: sharedClassesPayload,
             class_usage: Object.keys(classUsageStats).map(Number).sort((a, b) => a - b).map(k => classUsageStats[k]),
             issue_groups: Array.from(issueGroupsMap.values()),
             summary,
@@ -1806,8 +2068,8 @@
                         box_count: it.box_count,
                         similarity: bestRatio,
                         hamming_distance: bestDist,
-                        metric_label: `特徵一致 ${Math.round(bestRatio * 100)}% (差異 ${bestDist}/${totalBits} 格)`,
-                        reason: `與參考照片 ${bestMaster.image_name} 外觀雜湊一致度 ${Math.round(bestRatio * 100)}%（差異 ${bestDist}/${totalBits} 格）`
+                        metric_label: `相似度 ${Math.round(bestRatio * 100)}%`,
+                        reason: `與參考照片 ${bestMaster.image_name} 畫面相似度約 ${Math.round(bestRatio * 100)}%`
                     });
                 } else {
                     unassignedItems.push({
@@ -1815,7 +2077,7 @@
                         image_name: it.image_name,
                         best_candidate: bestMaster ? bestMaster.stem : '',
                         best_similarity: bestRatio > 0 ? bestRatio : 0.0,
-                        reason: `外觀特徵一致度僅 ${Math.round(Math.max(0, bestRatio) * 100)}%（低於篩選門檻 ${Math.round(similarityThreshold * 100)}%），不自動歸入`
+                        reason: `畫面相似度僅 ${Math.round(Math.max(0, bestRatio) * 100)}%（低於門檻 ${Math.round(similarityThreshold * 100)}%）`
                     });
                 }
             }
@@ -1826,8 +2088,8 @@
                 const avgSim = tList.reduce((acc, x) => acc + x.similarity, 0) / tList.length;
                 groupsOut.push({
                     group_id: `grp_vis_${idx + 1}`,
-                    group_name: `與「${m.image_name}」構圖接近的照片`,
-                    basis: `共 ${tList.length} 張照片（平均外觀雜湊一致度 ${Math.round(avgSim * 100)}%，門檻 ${Math.round(similarityThreshold * 100)}%）`,
+                    group_name: `與「${m.image_name}」相似的照片`,
+                    basis: `共 ${tList.length} 張照片（平均相似度約 ${Math.round(avgSim * 100)}%，門檻 ${Math.round(similarityThreshold * 100)}%）`,
                     recommended_master: m.stem,
                     has_master: true,
                     confidence: avgSim >= 0.85 ? 'high' : 'medium',
@@ -2274,7 +2536,15 @@
         }
 
         if (classesModified) {
-            if (await labelProvider.fileExists(classesFilename)) {
+            if (classesInfo.is_shared_external) {
+                const oldCls = await readActiveClassesText(classesInfo, labelProvider);
+                snapshot.external_classes_backup = {
+                    path: classesInfo.path,
+                    name: classesFilename,
+                    old_content: oldCls.text,
+                    existed: Boolean(oldCls.exists)
+                };
+            } else if (await labelProvider.fileExists(classesFilename)) {
                 const oldCls = await labelProvider.readTextFile(classesFilename);
                 snapshot.overwritten_files.push({ filename: classesFilename, old_content: oldCls.text });
             } else {
@@ -2300,7 +2570,7 @@
         }
         if (classesModified) {
             const clsContent = orderedNames.join('\n') + (orderedNames.length > 0 ? '\n' : '');
-            await labelProvider.writeTextFile(classesFilename, clsContent);
+            await writeActiveClassesText(classesInfo, labelProvider, clsContent);
         }
 
         await labelProvider.writeBackupSnapshot(backupId, snapshot);
@@ -2344,6 +2614,7 @@
                 classes: orderedNames,
                 classes_file_exists: classesModified ? true : classesInfo.exists,
                 classes_path: finalClassesPath,
+                shared_classes_active: Boolean(classesInfo.is_shared_external),
                 last_backup: {
                     backup_id: backupId,
                     operation: 'canvas_box_edit',
@@ -2383,6 +2654,29 @@
             box_count: lines.length,
             confirmed: rec.review_state === 'confirmed',
             scan: nextScan
+        };
+    }
+
+    async function handleSaveClasses(payload) {
+        const labelProvider = activeState.labelProvider || activeState.imageProvider;
+        const imageProvider = activeState.imageProvider;
+        if (!labelProvider) return { ok: false, error: '請先載入照片資料夾' };
+        const rawClasses = Array.isArray(payload?.classes) ? payload.classes : null;
+        if (!rawClasses) return { ok: false, error: '請提供類別名稱清單' };
+
+        const classesInfo = await parseClassesFromProvider(labelProvider, imageProvider, activeState.classesPath);
+        const orderedNames = rawClasses.map((name, idx) => String(name || '').trim() || `class_${idx}`);
+        const clsContent = orderedNames.join('\n') + (orderedNames.length > 0 ? '\n' : '');
+        await writeActiveClassesText(classesInfo, labelProvider, clsContent);
+        const classesFilename = classesInfo.filename || 'classes.txt';
+        const finalClassesPath = classesInfo.path || `${labelProvider.virtualPath}/${classesFilename}`;
+        if (!activeState.classesPath) activeState.classesPath = finalClassesPath;
+        return {
+            ok: true,
+            classes: orderedNames,
+            classes_file_exists: true,
+            classes_path: finalClassesPath,
+            shared_classes_active: Boolean(classesInfo.is_shared_external)
         };
     }
 
@@ -2709,14 +3003,22 @@
 
         const updateClassesTxt = payload.update_classes_txt !== false;
         if (updateClassesTxt) {
-            if (await labelProvider.fileExists(classesFilename)) {
+            if (classesInfo.is_shared_external) {
+                const oldCls = await readActiveClassesText(classesInfo, labelProvider);
+                snapshot.external_classes_backup = {
+                    path: classesInfo.path,
+                    name: classesFilename,
+                    old_content: oldCls.text,
+                    existed: Boolean(oldCls.exists)
+                };
+            } else if (await labelProvider.fileExists(classesFilename)) {
                 const oldCls = await labelProvider.readTextFile(classesFilename);
                 snapshot.overwritten_files.push({ filename: classesFilename, old_content: oldCls.text });
             } else {
                 snapshot.created_files.push(classesFilename);
             }
             const names = preview.new_classes_preview.map(c => c.name);
-            await labelProvider.writeTextFile(classesFilename, names.join('\n') + (names.length > 0 ? '\n' : ''));
+            await writeActiveClassesText(classesInfo, labelProvider, names.join('\n') + (names.length > 0 ? '\n' : ''));
         }
 
         await labelProvider.writeBackupSnapshot(backupId, snapshot);
@@ -2765,6 +3067,16 @@
             await targetProvider.writeTextFile(item.filename, item.old_content);
             restoredCount += 1;
         }
+        if (snapshot.external_classes_backup) {
+            const extBak = snapshot.external_classes_backup;
+            const extHandle = (extBak.path && customClassesFileHandles.get(extBak.path)?.handle) || sharedClassesState.handle;
+            if (extHandle) {
+                const writable = await extHandle.createWritable();
+                await writable.write(extBak.old_content || '');
+                await writable.close();
+                restoredCount += 1;
+            }
+        }
         for (const createdName of (snapshot.created_files || [])) {
             await targetProvider.removeFile(createdName);
             removedCount += 1;
@@ -2807,7 +3119,35 @@
     async function dispatchApiRequest(pathname, payload) {
         if (pathname === '/api/pick_path') {
             const mode = payload.mode || 'folder';
-            if (mode === 'file') {
+            if (mode === 'save_file') {
+                if (typeof window.showSaveFilePicker !== 'function') {
+                    return { ok: false, error: '請使用桌面版 Microsoft Edge 或 Google Chrome 開啟此網頁以建立共用類別檔。' };
+                }
+                try {
+                    const fh = await window.showSaveFilePicker({
+                        suggestedName: payload.suggested_name || 'classes.txt',
+                        types: [{ description: 'YOLO Classes File', accept: { 'text/plain': ['.txt', '.names'] } }]
+                    });
+                    if (typeof fh.requestPermission === 'function') {
+                        await fh.requestPermission({ mode: 'readwrite' });
+                    }
+                    if (payload.write_initial !== false) {
+                        const initialContent = typeof payload.initial_content === 'string' ? payload.initial_content : '';
+                        const writable = await fh.createWritable();
+                        await writable.write(initialContent);
+                        await writable.close();
+                    }
+                    const vFile = bindExternalClassesHandle(fh, {
+                        lockOverride: Boolean(payload.lock_override),
+                        extraBoundPaths: Array.isArray(payload.extra_bound_paths) ? payload.extra_bound_paths : []
+                    });
+                    await persistSharedClassesToIdb();
+                    return { ok: true, path: vFile, file_name: fh.name, cancelled: false, shared_created: true };
+                } catch (err) {
+                    if (err && err.name === 'AbortError') return { ok: true, path: '', cancelled: true };
+                    return { ok: false, error: `無法建立檔案：${err.message}` };
+                }
+            } else if (mode === 'file') {
                 if (typeof window.showOpenFilePicker !== 'function') {
                     return { ok: false, error: '請使用桌面版 Microsoft Edge 或 Google Chrome 開啟此網頁以選擇檔案。' };
                 }
@@ -2816,9 +3156,15 @@
                         multiple: false,
                         types: [{ description: 'Classes File', accept: { 'text/plain': ['.txt', '.names'] } }]
                     });
-                    const vFile = `[本機檔案] ${fh.name}`;
-                    customClassesFileHandles.set(vFile, { name: fh.name, handle: fh });
-                    return { ok: true, path: vFile, cancelled: false };
+                    if (typeof fh.requestPermission === 'function') {
+                        await fh.requestPermission({ mode: 'readwrite' });
+                    }
+                    const vFile = bindExternalClassesHandle(fh, {
+                        lockOverride: Boolean(payload.lock_override),
+                        extraBoundPaths: Array.isArray(payload.extra_bound_paths) ? payload.extra_bound_paths : []
+                    });
+                    await persistSharedClassesToIdb();
+                    return { ok: true, path: vFile, file_name: fh.name, cancelled: false };
                 } catch (err) {
                     if (err && err.name === 'AbortError') return { ok: true, path: '', cancelled: true };
                     return { ok: false, error: `無法選擇檔案：${err.message}` };
@@ -2889,6 +3235,87 @@
             return { ok: true };
         }
 
+        if (pathname === '/api/shared_classes') {
+            await ensureSharedClassesLoadedFromIdb();
+            const action = String(payload.action || '').trim();
+            if (action === 'authorize') {
+                if (!sharedClassesState.handle) {
+                    return { ok: false, missing_file: true, error: '尚未綁定任何共用 classes.txt 檔案。' };
+                }
+                if (typeof sharedClassesState.handle.requestPermission === 'function') {
+                    try {
+                        const perm = await sharedClassesState.handle.requestPermission({ mode: 'readwrite' });
+                        if (perm !== 'granted') {
+                            return { ok: false, error: '未獲得寫入權限，請點擊瀏覽器提示中的「允許」後再試。' };
+                        }
+                    } catch (err) {
+                        if (err && err.name === 'NotFoundError') {
+                            await clearSharedClassesStateAndIdb();
+                            return { ok: false, missing_file: true, error: '找不到原本的共用類別檔（可能已被刪除或移動），已自動清除舊設定。' };
+                        }
+                        return { ok: false, error: `授權失敗：${err.message}` };
+                    }
+                }
+                if (typeof sharedClassesState.handle.getFile === 'function') {
+                    try {
+                        await sharedClassesState.handle.getFile();
+                    } catch (err) {
+                        if (err && err.name === 'NotFoundError') {
+                            await clearSharedClassesStateAndIdb();
+                            return { ok: false, missing_file: true, error: '找不到原本的共用類別檔（可能已被刪除或移動），已自動清除舊設定。' };
+                        }
+                        return { ok: false, error: `無法讀取共用類別檔：${err.message}` };
+                    }
+                }
+                if (payload.bind_current && activeState.imageProvider && !activeState.imageProvider.isMemory) {
+                    const boundSet = new Set(Array.isArray(sharedClassesState.boundWorkspaces) ? sharedClassesState.boundWorkspaces : []);
+                    boundSet.add(activeState.imageProvider.virtualPath);
+                    sharedClassesState.boundWorkspaces = Array.from(boundSet);
+                    await persistSharedClassesToIdb();
+                }
+                if (sharedClassesState.vPath) {
+                    customClassesFileHandles.set(sharedClassesState.vPath, {
+                        name: sharedClassesState.name || sharedClassesState.handle.name || 'classes.txt',
+                        handle: sharedClassesState.handle
+                    });
+                }
+                return { ok: true, path: sharedClassesState.vPath, file_name: sharedClassesState.name };
+            }
+            if (action === 'set_lock') {
+                sharedClassesState.lockOverride = Boolean(payload.lock_override);
+                await persistSharedClassesToIdb();
+                return { ok: true, lock_override: sharedClassesState.lockOverride };
+            }
+            if (action === 'bind_workspaces') {
+                const boundSet = new Set(Array.isArray(sharedClassesState.boundWorkspaces) ? sharedClassesState.boundWorkspaces : []);
+                if (Array.isArray(payload.workspaces)) {
+                    payload.workspaces.forEach(w => { if (w) boundSet.add(w); });
+                }
+                if (payload.bind_current && activeState.imageProvider && !activeState.imageProvider.isMemory) {
+                    boundSet.add(activeState.imageProvider.virtualPath);
+                }
+                sharedClassesState.boundWorkspaces = Array.from(boundSet);
+                await persistSharedClassesToIdb();
+                return { ok: true, bound_workspaces: sharedClassesState.boundWorkspaces };
+            }
+            if (action === 'clear') {
+                const oldVPath = sharedClassesState.vPath;
+                if (oldVPath) customClassesFileHandles.delete(oldVPath);
+                if (activeState.classesPath && (activeState.classesPath === oldVPath || activeState.classesPath.startsWith('[共用類別檔]'))) {
+                    activeState.classesPath = '';
+                }
+                sharedClassesState.loaded = true;
+                sharedClassesState.handle = null;
+                sharedClassesState.name = '';
+                sharedClassesState.vPath = '';
+                sharedClassesState.lockOverride = false;
+                sharedClassesState.boundWorkspaces = [];
+                await deleteRecentHandleFromIdb(SHARED_CLASSES_IDB_KEY);
+                return { ok: true };
+            }
+            return { ok: false, error: `不支援的共用類別檔操作：${action}` };
+        }
+
         if (pathname === '/api/group' || pathname === '/api/recommend_groups') {
             return await handleGroupApi(payload);
         }
@@ -2917,6 +3344,10 @@
 
         if (pathname === '/api/save_single_label') {
             return await handleSaveSingleLabel(payload);
+        }
+
+        if (pathname === '/api/save_classes') {
+            return await handleSaveClasses(payload);
         }
 
         if (pathname === '/api/undo') {
@@ -2985,10 +3416,7 @@
         if (data.ok) {
             document.getElementById('inputImageDir').value = data.sample_dir;
             document.getElementById('inputImageDirLoaded').value = data.sample_dir;
-            document.getElementById('chkSameFolder').checked = true;
-            document.getElementById('inputLabelDir').value = '';
             document.getElementById('inputClassesPath').value = '';
-            if (typeof toggleSameFolderMode === 'function') toggleSameFolderMode();
             if (typeof scanCurrentWorkspace === 'function') {
                 await scanCurrentWorkspace({ restoreSession: false });
             }
@@ -3010,10 +3438,7 @@
             const vPath = await registerDirectoryHandle(savedHandle);
             document.getElementById('inputImageDir').value = vPath;
             document.getElementById('inputImageDirLoaded').value = vPath;
-            document.getElementById('chkSameFolder').checked = true;
-            document.getElementById('inputLabelDir').value = '';
             document.getElementById('inputClassesPath').value = '';
-            if (typeof toggleSameFolderMode === 'function') toggleSameFolderMode();
             if (typeof scanCurrentWorkspace === 'function') {
                 await scanCurrentWorkspace({ restoreSession: true });
             }
@@ -3036,12 +3461,11 @@
             btn.style.display = 'none';
         });
 
-        // 2. 將路徑輸入框設為唯讀並支援點擊直接觸發選擇視窗（遵循瀏覽器安全沙盒）
+        // 2. 將路徑輸入框設為唯讀，點擊時直接開啟檔案或資料夾選擇視窗
         const pathInputs = [
             { id: 'inputImageDirLoaded', mode: 'folder', placeholder: '點擊右側「選擇資料夾...」授權存取' },
-            { id: 'inputLabelDir', mode: 'folder', placeholder: '點擊右側「選擇...」指定標記資料夾' },
             { id: 'inputClassesPath', mode: 'file', placeholder: '自動尋找 classes.txt，或點擊右側指定' },
-            { id: 'inputCopyOutputDir', mode: 'folder', placeholder: '預設：標記資料夾（可點右側選擇其他資料夾）' }
+            { id: 'inputCopyOutputDir', mode: 'folder', placeholder: '預設：目前資料夾（或點右側另選其他資料夾）' }
         ];
         for (const cfg of pathInputs) {
             const el = document.getElementById(cfg.id);
@@ -3051,7 +3475,11 @@
                 el.style.cursor = 'pointer';
                 el.title = '請點擊選擇本機資料夾或檔案';
                 el.addEventListener('click', () => {
-                    if (typeof pickPath === 'function') pickPath(cfg.id, cfg.mode);
+                    if (cfg.id === 'inputClassesPath' && typeof pickSharedClassesFile === 'function') {
+                        pickSharedClassesFile();
+                    } else if (typeof pickPath === 'function') {
+                        pickPath(cfg.id, cfg.mode);
+                    }
                 });
             }
         }

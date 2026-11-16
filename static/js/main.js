@@ -132,9 +132,6 @@ async function switchStep(stepName) {
 
     if (stepName === 'apply') {
         renderBatchApplyStep();
-        if (typeof maybePromptGuidedTour === 'function' && !isTourInternalStepSwitch) {
-            setTimeout(() => maybePromptGuidedTour('batch_apply'), 220);
-        }
     } else if (stepName === 'review') {
         setReviewScope(reviewScope);
         setTimeout(updateReviewLayout, 30);
@@ -196,13 +193,11 @@ async function pickAndLoadFolder() {
             reviewQueue = [];
             activeStem = null;
             similarityMap = {};
+            simBannerState = { active: false, warnings: [] };
 
             document.getElementById('inputImageDir').value = data.path;
             document.getElementById('inputImageDirLoaded').value = data.path;
-            document.getElementById('chkSameFolder').checked = true;
-            document.getElementById('inputLabelDir').value = '';
             document.getElementById('inputClassesPath').value = '';
-            toggleSameFolderMode();
             await scanCurrentWorkspace({ restoreSession: true });
             showToast(`已成功載入資料夾：${scanData?.folder_name || data.path}`, 'success');
         } else if (data.ok && data.cancelled) {
@@ -284,14 +279,695 @@ async function openFolderPath(path) {
     }
 }
 
-function toggleSameFolderMode() {
-    const same = document.getElementById('chkSameFolder').checked;
-    document.getElementById('separateLabelDirGroup').style.display = same ? 'none' : 'flex';
-}
-
 function toggleLoadSettingsPanel() { openModal('pathSettingsModal'); }
 
 
+
+const SHARED_CLASSES_LS_KEY = 'yolo_shared_classes_cfg_v1';
+const LAST_FOLDER_CLASSES_HINT_LS_KEY = 'yolo_last_folder_classes_hint_v1';
+const sharedClassesGuideDismissedWs = new Set();
+
+function canonSharedPath(p) {
+    return String(p || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+}
+
+function loadLocalSharedClassesCfg() {
+    try {
+        const raw = localStorage.getItem(SHARED_CLASSES_LS_KEY);
+        if (!raw) return { path: '', fileName: '', lockOverride: false, boundWorkspaces: [] };
+        const parsed = JSON.parse(raw);
+        return {
+            path: typeof parsed.path === 'string' ? parsed.path : '',
+            fileName: typeof parsed.fileName === 'string' ? parsed.fileName : '',
+            lockOverride: Boolean(parsed.lockOverride),
+            boundWorkspaces: Array.isArray(parsed.boundWorkspaces) ? parsed.boundWorkspaces.filter(Boolean) : []
+        };
+    } catch (_) {
+        return { path: '', fileName: '', lockOverride: false, boundWorkspaces: [] };
+    }
+}
+
+function saveLocalSharedClassesCfg(cfg) {
+    try {
+        localStorage.setItem(SHARED_CLASSES_LS_KEY, JSON.stringify({
+            path: cfg.path || '',
+            fileName: cfg.fileName || '',
+            lockOverride: Boolean(cfg.lockOverride),
+            boundWorkspaces: Array.isArray(cfg.boundWorkspaces) ? cfg.boundWorkspaces : []
+        }));
+    } catch (_) {}
+}
+
+function loadLastFolderClassesHint() {
+    try {
+        const raw = localStorage.getItem(LAST_FOLDER_CLASSES_HINT_LS_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.folderPath && Array.isArray(parsed.classes) && parsed.classes.length > 0) {
+            return parsed;
+        }
+    } catch (_) {}
+    return null;
+}
+
+function isMemoryOrSampleScan(scan) {
+    if (!scan || !scan.workspace_id) return true;
+    const imgDir = String(scan.image_dir || '');
+    return imgDir.startsWith('[記憶體範例]');
+}
+
+function recordPrevFolderClassesHint(scan) {
+    if (isMemoryOrSampleScan(scan)) return;
+    if (scan.shared_classes_info && scan.shared_classes_info.has_binding) return;
+    if (Array.isArray(scan.classes) && scan.classes.length > 0) {
+        try {
+            localStorage.setItem(LAST_FOLDER_CLASSES_HINT_LS_KEY, JSON.stringify({
+                folderPath: scan.image_dir || '',
+                folderName: scan.folder_name || scan.image_dir || '',
+                classes: scan.classes.map(c => String(c || '').trim()).filter(Boolean)
+            }));
+        } catch (_) {}
+    }
+}
+
+function isPathUnderSharedDir(folderPath, sharedFilePath) {
+    const f = String(folderPath || '').trim();
+    const s = String(sharedFilePath || '').trim();
+    if (!f || !s || f.startsWith('[') || s.startsWith('[')) return false;
+    const fNorm = f.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+    const sParts = s.replace(/\//g, '\\').split('\\');
+    sParts.pop();
+    const sDir = sParts.join('\\').replace(/\\+$/, '').toLowerCase();
+    if (!sDir) return false;
+    return fNorm === sDir || fNorm.startsWith(sDir + '\\');
+}
+
+function areSiblingOrSameTreePaths(pathA, pathB) {
+    const a = String(pathA || '').trim();
+    const b = String(pathB || '').trim();
+    if (!a || !b) return false;
+    if (canonSharedPath(a) === canonSharedPath(b)) return false;
+    if (a.startsWith('[') || b.startsWith('[')) return true;
+    const normA = a.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+    const normB = b.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+    const parentA = normA.includes('\\') ? normA.slice(0, normA.lastIndexOf('\\')) : '';
+    const parentB = normB.includes('\\') ? normB.slice(0, normB.lastIndexOf('\\')) : '';
+    if (!parentA || !parentB) return false;
+    return parentA === parentB || normA.startsWith(parentB + '\\') || normB.startsWith(parentA + '\\');
+}
+
+function computePythonSharedClassesInfo(scan, prevSharedInfo = null) {
+    if (!scan || isMemoryOrSampleScan(scan)) return null;
+    if (window.YoloWebEngine?.isActive()) return scan.shared_classes_info || prevSharedInfo || null;
+    const cfg = loadLocalSharedClassesCfg();
+    const effectivePath = cfg.path || prevSharedInfo?.virtual_path || '';
+    if (!effectivePath) {
+        return {
+            has_binding: false,
+            active: false,
+            file_name: '',
+            virtual_path: '',
+            lock_override: false,
+            needs_permission: false,
+            missing_file: false,
+            has_local_classes_file: Boolean(scan.classes_file_exists),
+            bound_workspaces: [],
+            last_shared_available: false,
+            last_shared_name: ''
+        };
+    }
+    const active = Boolean(scan.classes_path && canonSharedPath(scan.classes_path) === canonSharedPath(effectivePath));
+    const isBound = Array.isArray(cfg.boundWorkspaces) && cfg.boundWorkspaces.some(w => canonSharedPath(w) === canonSharedPath(scan.image_dir));
+    const underRoot = isPathUnderSharedDir(scan.image_dir, effectivePath);
+    const hasBinding = Boolean(active || cfg.lockOverride || isBound || (underRoot && !scan.classes_file_exists));
+    return {
+        has_binding: hasBinding,
+        active,
+        file_name: hasBinding ? (cfg.fileName || prevSharedInfo?.file_name || 'classes.txt') : '',
+        virtual_path: hasBinding ? effectivePath : '',
+        lock_override: Boolean(cfg.lockOverride),
+        needs_permission: false,
+        missing_file: Boolean(prevSharedInfo?.missing_file),
+        has_local_classes_file: Boolean(prevSharedInfo?.has_local_classes_file ?? scan.classes_file_exists),
+        bound_workspaces: cfg.boundWorkspaces || [],
+        last_shared_available: Boolean(!active && !hasBinding && (prevSharedInfo?.last_shared_available ?? Boolean(cfg.path))),
+        last_shared_name: prevSharedInfo?.last_shared_name || cfg.fileName || 'classes.txt'
+    };
+}
+
+function buildSharedGuideBannerHtml(opts) {
+    const actionsHtml = (opts.actions || []).map(act =>
+        `<button type="button" class="${act.cls || 'btn btn-secondary btn-sm'}" onclick="${act.onclick}">${act.label}</button>`
+    ).join('');
+    return `
+        <div class="shared-classes-guide-body">
+            <div class="shared-classes-guide-title">${opts.title}</div>
+            <div class="shared-classes-guide-desc">${opts.desc}</div>
+        </div>
+        <div class="shared-classes-guide-actions">${actionsHtml}</div>
+    `;
+}
+
+function renderSharedClassesGuidance() {
+    const pillBtn = document.getElementById('sharedClassesStatusPill');
+    const pillText = document.getElementById('sharedClassesPillText');
+    const optRow = document.getElementById('sharedClassesOptionsRow');
+    const optBadge = document.getElementById('sharedClassesBindingBadge');
+    const optPath = document.getElementById('sharedClassesBindingPath');
+    const chkLock = document.getElementById('chkLockSharedClasses');
+    const loadBanner = document.getElementById('sharedClassesLoadGuide');
+    const reviewBanner = document.getElementById('sharedClassesGuideBanner');
+
+    const applyBannerState = (el, show, themeClass, html) => {
+        if (!el) return;
+        el.classList.remove('guide-warn', 'guide-nextstep');
+        if (!show) {
+            el.style.display = 'none';
+            el.innerHTML = '';
+            return;
+        }
+        if (themeClass) el.classList.add(themeClass);
+        el.innerHTML = html;
+        el.style.display = 'flex';
+    };
+
+    if (!scanData || !scanData.ok || isMemoryOrSampleScan(scanData)) {
+        if (pillBtn) pillBtn.style.display = 'none';
+        if (optRow) optRow.style.display = 'none';
+        applyBannerState(loadBanner, false);
+        applyBannerState(reviewBanner, false);
+        return;
+    }
+
+    const sInfo = scanData.shared_classes_info || null;
+    const classesList = Array.isArray(scanData.classes) ? scanData.classes : [];
+    const curWsId = scanData.workspace_id || '';
+    const isDismissed = sharedClassesGuideDismissedWs.has(curWsId);
+
+    // 1. 頂部狀態膠囊 & 路徑設定彈窗內的共用管理列
+    if (pillBtn && pillText) {
+        if (sInfo && sInfo.needs_permission && !sInfo.active) {
+            pillBtn.classList.add('is-pending-auth');
+            pillBtn.onclick = () => authorizeAndApplySharedClasses();
+            pillText.textContent = `⚠ 點此授權共用類別：${sInfo.file_name || 'classes.txt'}`;
+            pillBtn.style.display = 'inline-flex';
+        } else if (sInfo && sInfo.active) {
+            pillBtn.classList.remove('is-pending-auth');
+            pillBtn.onclick = () => openModal('pathSettingsModal');
+            pillText.textContent = `📌 共用類別：${sInfo.file_name || 'classes.txt'} (${classesList.length}類)`;
+            pillBtn.style.display = 'inline-flex';
+        } else if (sInfo && sInfo.has_binding) {
+            pillBtn.classList.remove('is-pending-auth');
+            pillBtn.onclick = () => openModal('pathSettingsModal');
+            pillText.textContent = `📌 已綁共用檔（目前用本機類別檔）`;
+            pillBtn.style.display = 'inline-flex';
+        } else {
+            pillBtn.style.display = 'none';
+        }
+    }
+
+    if (optRow) {
+        if (sInfo && sInfo.has_binding) {
+            optRow.style.display = 'flex';
+            if (optBadge) {
+                optBadge.textContent = sInfo.active ? '✅ 目前資料夾使用中共用檔' : (sInfo.needs_permission ? '⚠️ 待授權共用檔' : '⏸️ 已綁定但未覆蓋本機檔');
+            }
+            if (optPath) {
+                optPath.textContent = sInfo.virtual_path || sInfo.file_name || '';
+            }
+            if (chkLock) {
+                chkLock.checked = Boolean(sInfo.lock_override);
+            }
+        } else {
+            optRow.style.display = 'none';
+        }
+    }
+
+    // 2. 分級情境引導（A/B/D 提升為寬敞置中決策彈窗；C 顯示精簡下一步橫幅；未決策前載入頁亦保留入口）
+    const hasPhotos = Boolean(scanData.summary && scanData.summary.photo_count > 0);
+    let modalConfig = null;
+    let loadCardHtml = '';
+    let loadCardTheme = '';
+    let reviewStripHtml = '';
+    let reviewStripTheme = '';
+
+    if (sInfo && sInfo.needs_permission && !sInfo.active) {
+        // 情境 D：瀏覽器重開後需要一鍵重新授權讀取共用的 classes.txt
+        modalConfig = {
+            isWarn: true,
+            title: `偵測到上次共用的類別檔「${escapeHtml(sInfo.file_name || 'classes.txt')}」`,
+            subtitle: '',
+            bodyHtml: `
+                <div class="setup-auth-card">
+                    <p>點擊下方「<strong>一鍵授權並繼續共用</strong>」，並允許瀏覽器讀寫該檔案，即可讓此資料夾沿用原本共用的類別定義。</p>
+                    <div class="setup-auth-actions">
+                        <button type="button" class="btn btn-primary btn-lg" onclick="authorizeAndApplySharedClasses()">✓ 一鍵授權並繼續共用</button>
+                        <button type="button" class="btn btn-secondary" onclick="clearSharedClassesBinding()">改用本機檔</button>
+                    </div>
+                </div>
+            `
+        };
+        loadCardTheme = 'guide-warn';
+        loadCardHtml = buildSharedGuideBannerHtml({
+            title: modalConfig.title,
+            desc: '',
+            actions: [
+                { label: '✓ 一鍵授權並繼續共用', cls: 'btn btn-primary btn-sm', onclick: 'authorizeAndApplySharedClasses()' },
+                { label: '改用本機檔', cls: 'btn btn-secondary btn-sm', onclick: 'clearSharedClassesBinding()' }
+            ]
+        });
+    } else if (sInfo && sInfo.active && classesList.length === 0) {
+        // 已選擇／建立空白共用檔：關閉設定彈窗，不重複在畫布上方顯示就緒橫幅
+        if (activeModal && activeModal.id === 'sharedClassesSetupModal') {
+            closeModal('sharedClassesSetupModal');
+        }
+    } else if ((!sInfo || !sInfo.has_binding) && !scanData.classes_file_exists && classesList.length === 0) {
+        const prevHint = loadLastFolderClassesHint();
+        const isRelatedPrev = Boolean(prevHint && areSiblingOrSameTreePaths(prevHint.folderPath, scanData.image_dir));
+        const reuseLastSharedBtnHtml = (sInfo && sInfo.last_shared_available && sInfo.last_shared_name)
+            ? `<button type="button" class="btn btn-primary" onclick="useLastSharedClassesForCurrentFolder()">🔗 沿用上次共用檔（${escapeHtml(sInfo.last_shared_name)}）</button>`
+            : '';
+        if (isRelatedPrev) {
+            // 情境 B：同專案上層下剛標完 ok/，切進空白 ng/ 時優先跳大彈窗防止編號撞名
+            const prevNames = prevHint.classes.slice(0, 3).map((c, idx) => `${idx}: ${escapeHtml(c)}`).join('、');
+            const moreText = prevHint.classes.length > 3 ? ` 等 ${prevHint.classes.length} 類` : '';
+            const bringPreview = prevHint.classes.slice(0, 2).map(escapeHtml).join('、') + (prevHint.classes.length > 2 ? '…' : '');
+            modalConfig = {
+                isWarn: true,
+                title: `「${escapeHtml(scanData.folder_name || '目前資料夾')}」尚未建立 classes.txt`,
+                subtitle: `上個資料夾「${escapeHtml(prevHint.folderName)}」已建有 [${prevNames}${moreText}]，建議共用以免編號撞名。`,
+                bodyHtml: `
+                    <div class="setup-cards-grid">
+                        <div class="setup-option-card is-recommended">
+                            <div class="setup-option-head">
+                                <h4>📂 共用同一份清單</h4>
+                                <span class="setup-rec-tag">推薦</span>
+                            </div>
+                            <p class="setup-option-desc">帶入「${escapeHtml(prevHint.folderName)}」類別，新增時自動接續編號。</p>
+                            <pre class="setup-folder-tree">📂 上層共用資料夾/
+  ├── 🏷️ classes.txt  (含 ${bringPreview} + 新類別)
+  ├── 📁 ${escapeHtml(prevHint.folderName)}/
+  └── 📁 ${escapeHtml(scanData.folder_name || '目前資料夾')}/</pre>
+                            <div class="setup-card-actions">
+                                <button type="button" class="btn btn-primary btn-lg" onclick="createSharedClassesFromPrevHint()">✨ 新建共用檔（帶入：${bringPreview}）</button>
+                                <button type="button" class="btn btn-secondary" onclick="pickSharedClassesFile()">📄 挑選現有檔案</button>
+                            </div>
+                        </div>
+                        <div class="setup-option-card">
+                            <div class="setup-option-head">
+                                <h4>📁 此資料夾各自獨立使用</h4>
+                            </div>
+                            <p class="setup-option-desc">從編號 0 建立自己的類別檔。</p>
+                            <pre class="setup-folder-tree">📂 ${escapeHtml(scanData.folder_name || '目前資料夾')}/
+  ├── 🖼️ 照片與 📄 標記檔
+  └── 🏷️ classes.txt  (獨立編號 0)</pre>
+                            <div class="setup-card-actions">
+                                <button type="button" class="btn btn-secondary btn-lg" onclick="startSingleFolderDirect()">＋ 獨立畫框 (W)</button>
+                            </div>
+                        </div>
+                    </div>
+                `
+            };
+            loadCardTheme = 'guide-warn';
+            loadCardHtml = buildSharedGuideBannerHtml({
+                title: `⚠️ 尚未建立 classes.txt（前資料夾已有 ${prevNames}${moreText}）`,
+                desc: '',
+                actions: [
+                    { label: '設定類別檔', cls: 'btn btn-primary btn-sm', onclick: 'openSharedClassesSetupModalManually()' }
+                ]
+            });
+        } else {
+            // 情境 A：全新無 classes.txt 的資料夾 — 寬敞雙欄圖示決策彈窗
+            modalConfig = {
+                isWarn: false,
+                title: '尚未建立類別檔 (classes.txt)',
+                subtitle: '',
+                bodyHtml: `
+                    <div class="setup-cards-grid">
+                        <div class="setup-option-card">
+                            <div class="setup-option-head">
+                                <h4>📁 只有這一個資料夾</h4>
+                            </div>
+                            <p class="setup-option-desc">畫框後自動於此資料夾建立 <code>classes.txt</code>。</p>
+                            <pre class="setup-folder-tree">📂 ${escapeHtml(scanData.folder_name || '專案資料夾')}/
+  ├── 🖼️ 照片_01.jpg
+  ├── 📄 照片_01.txt
+  └── 🏷️ classes.txt  ← 自動建在這</pre>
+                            <div class="setup-card-actions">
+                                <button type="button" class="btn btn-primary btn-lg" onclick="startSingleFolderDirect()">＋ 直接畫框 (W)</button>
+                            </div>
+                        </div>
+                        <div class="setup-option-card">
+                            <div class="setup-option-head">
+                                <h4>📂 分成多個資料夾（如 ok/、ng/）</h4>
+                            </div>
+                            <p class="setup-option-desc">把類別檔放上一層共用，切換資料夾自動同步。</p>
+                            <pre class="setup-folder-tree">📂 上層資料夾/
+  ├── 🏷️ classes.txt  ← 共用這份
+  ├── 📁 ok/  (照片與標記)
+  └── 📁 ng/  (照片與標記)</pre>
+                            <div class="setup-card-actions">
+                                ${reuseLastSharedBtnHtml}
+                                <button type="button" class="btn btn-secondary btn-lg" onclick="createSharedClassesFile()">✨ 新建共用檔</button>
+                                <button type="button" class="btn btn-ghost" onclick="pickSharedClassesFile()">📄 挑選現有檔案</button>
+                            </div>
+                        </div>
+                    </div>
+                `
+            };
+            loadCardHtml = buildSharedGuideBannerHtml({
+                title: '💡 尚未建立類別檔 (classes.txt)',
+                desc: '',
+                actions: [
+                    { label: '設定類別檔', cls: 'btn btn-primary btn-sm', onclick: 'openSharedClassesSetupModalManually()' }
+                ]
+            });
+        }
+    }
+
+    if (loadCardHtml) {
+        applyBannerState(loadBanner, true, loadCardTheme, loadCardHtml);
+    } else {
+        applyBannerState(loadBanner, false);
+    }
+
+    if (reviewStripHtml) {
+        applyBannerState(reviewBanner, true, reviewStripTheme, reviewStripHtml);
+    } else {
+        applyBannerState(reviewBanner, false);
+    }
+
+    if (modalConfig && hasPhotos && !isDismissed && !isGuidedTourActive() && (!activeModal || activeModal.id === 'sharedClassesSetupModal')) {
+        populateSharedSetupModal(modalConfig);
+        if (!activeModal || activeModal.id !== 'sharedClassesSetupModal') {
+            openModal('sharedClassesSetupModal');
+        }
+    } else if (!modalConfig && activeModal && activeModal.id === 'sharedClassesSetupModal') {
+        closeModal('sharedClassesSetupModal');
+    }
+}
+
+function populateSharedSetupModal(cfg) {
+    const hdr = document.getElementById('sharedSetupHeader');
+    const title = document.getElementById('sharedSetupModalTitle');
+    const sub = document.getElementById('sharedSetupSubtitle');
+    const body = document.getElementById('sharedSetupBody');
+    if (!hdr || !title || !body) return;
+    hdr.classList.toggle('is-warn', Boolean(cfg.isWarn));
+    title.innerHTML = cfg.title || '';
+    if (sub) {
+        sub.innerHTML = cfg.subtitle || '';
+        sub.style.display = cfg.subtitle ? '' : 'none';
+    }
+    body.innerHTML = cfg.bodyHtml || '';
+}
+
+function openSharedClassesSetupModalManually() {
+    if (scanData?.workspace_id) {
+        sharedClassesGuideDismissedWs.delete(scanData.workspace_id);
+    }
+    renderSharedClassesGuidance();
+}
+
+function dismissSharedClassesGuide() {
+    if (scanData?.workspace_id) {
+        sharedClassesGuideDismissedWs.add(scanData.workspace_id);
+    }
+    if (activeModal && activeModal.id === 'sharedClassesSetupModal') {
+        closeModal('sharedClassesSetupModal');
+    }
+    renderSharedClassesGuidance();
+}
+
+function startSingleFolderDirect() {
+    if (scanData?.workspace_id) {
+        sharedClassesGuideDismissedWs.add(scanData.workspace_id);
+    }
+    if (activeModal && activeModal.id === 'sharedClassesSetupModal') {
+        closeModal('sharedClassesSetupModal');
+    }
+    renderSharedClassesGuidance();
+    triggerDrawBoxFromSharedGuide();
+}
+
+function triggerDrawBoxFromSharedGuide() {
+    if (currentStep !== 'review') {
+        switchStep('review');
+    }
+    if (!activeStem && Array.isArray(scanData?.items)) {
+        const firstPhoto = scanData.items.find(i => i.has_image);
+        if (firstPhoto) activeStem = firstPhoto.stem;
+    }
+    toggleDrawBoxMode(true);
+}
+
+async function applyPickedSharedClassesResult(data, extraBoundPaths = []) {
+    if (!data || !data.ok || !data.path || data.cancelled) return false;
+    if (dirtyCanvasStem) {
+        const flushed = await flushUnsavedCanvasDraftIfNeeded();
+        if (!flushed) return false;
+    }
+    document.getElementById('inputClassesPath').value = data.path;
+    if (!window.YoloWebEngine?.isActive()) {
+        const prevCfg = loadLocalSharedClassesCfg();
+        const boundSet = new Set(prevCfg.boundWorkspaces || []);
+        if (scanData?.image_dir) boundSet.add(scanData.image_dir);
+        extraBoundPaths.forEach(p => { if (p) boundSet.add(p); });
+        saveLocalSharedClassesCfg({
+            path: data.path,
+            fileName: data.file_name || 'classes.txt',
+            lockOverride: prevCfg.lockOverride,
+            boundWorkspaces: Array.from(boundSet)
+        });
+    }
+    if (scanData?.workspace_id) {
+        sharedClassesGuideDismissedWs.delete(scanData.workspace_id);
+    }
+    if (activeModal && (activeModal.id === 'sharedClassesSetupModal' || activeModal.id === 'pathSettingsModal')) {
+        closeModal(activeModal.id);
+    }
+    await scanCurrentWorkspace({
+        classesPathOverride: data.path,
+        keepStep: currentStep !== 'load'
+    });
+    return true;
+}
+
+async function createSharedClassesFile(options = {}) {
+    if (isPickingPath) {
+        showToast('選擇視窗已經開啟，請完成或取消目前視窗。', 'info');
+        return;
+    }
+    isPickingPath = true;
+    try {
+        const curClasses = Array.isArray(options.initialClasses)
+            ? options.initialClasses
+            : (Array.isArray(scanData?.classes) ? scanData.classes : []);
+        const cleanedClasses = curClasses.map(c => String(c || '').trim()).filter(Boolean);
+        const initialContent = cleanedClasses.length > 0 ? cleanedClasses.join('\n') + '\n' : '';
+        const extraBoundPaths = Array.isArray(options.extraBoundPaths) ? options.extraBoundPaths : [];
+
+        const res = await fetch('/api/pick_path', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                mode: 'save_file',
+                suggested_name: 'classes.txt',
+                title: '建議儲存在「上一層共用資料夾」並命名為 classes.txt',
+                initial_dir: scanData?.image_dir || '',
+                prefer_parent: true,
+                write_initial: true,
+                initial_content: initialContent,
+                extra_bound_paths: extraBoundPaths
+            })
+        });
+        const data = await res.json();
+        if (data.ok && data.path) {
+            const ok = await applyPickedSharedClassesResult(data, extraBoundPaths);
+            if (ok) {
+                const msgPrefix = cleanedClasses.length > 0
+                    ? `已建立共用檔「${data.file_name || 'classes.txt'}」（已帶入 ${cleanedClasses.join('、')}）`
+                    : `已建立共用檔「${data.file_name || 'classes.txt'}」`;
+                showToast(msgPrefix, 'success');
+            }
+        } else if (!data.ok) {
+            showToast(data.error || '無法開啟建立檔案視窗', 'warn');
+        }
+    } catch (e) {
+        showToast('建立共用類別檔時發生錯誤', 'error');
+    } finally {
+        isPickingPath = false;
+    }
+}
+
+async function createSharedClassesFromPrevHint() {
+    const prevHint = loadLastFolderClassesHint();
+    if (!prevHint || !Array.isArray(prevHint.classes) || prevHint.classes.length === 0) {
+        return createSharedClassesFile();
+    }
+    return createSharedClassesFile({
+        initialClasses: prevHint.classes,
+        extraBoundPaths: prevHint.folderPath ? [prevHint.folderPath] : []
+    });
+}
+
+async function pickSharedClassesFile() {
+    if (isPickingPath) {
+        showToast('選擇視窗已經開啟，請查看桌面或瀏覽器對話框。', 'info');
+        return;
+    }
+    isPickingPath = true;
+    try {
+        const prevHint = loadLastFolderClassesHint();
+        const extraBoundPaths = prevHint?.folderPath ? [prevHint.folderPath] : [];
+        const res = await fetch('/api/pick_path', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                mode: 'file',
+                title: '選擇共用的 classes.txt 類別定義檔',
+                initial_dir: scanData?.image_dir || '',
+                prefer_parent: true,
+                extra_bound_paths: extraBoundPaths
+            })
+        });
+        const data = await res.json();
+        if (data.ok && data.path) {
+            const ok = await applyPickedSharedClassesResult(data, extraBoundPaths);
+            if (ok) {
+                showToast(`已連結共用類別檔：${data.file_name || data.path}`, 'success');
+            }
+        } else if (!data.ok) {
+            showToast(data.error || '無法開啟檔案選擇視窗', 'warn');
+        }
+    } catch (e) {
+        showToast('選擇共用類別檔時發生錯誤', 'error');
+    } finally {
+        isPickingPath = false;
+    }
+}
+
+async function authorizeAndApplySharedClasses() {
+    try {
+        const localSharedCfg = loadLocalSharedClassesCfg();
+        const res = await fetch('/api/shared_classes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                action: 'authorize',
+                bind_current: true,
+                shared_classes_path: localSharedCfg.path || scanData?.shared_classes_info?.virtual_path || ''
+            })
+        });
+        const data = await res.json();
+        if (!data.ok) {
+            if (data.missing_file) {
+                saveLocalSharedClassesCfg({ path: '', fileName: '', lockOverride: false, boundWorkspaces: [] });
+                const clsInput = document.getElementById('inputClassesPath');
+                if (clsInput) clsInput.value = '';
+                if (activeModal && activeModal.id === 'sharedClassesSetupModal') {
+                    closeModal('sharedClassesSetupModal');
+                }
+                showToast(data.error || '找不到原本的共用類別檔（可能已被刪除），已自動清除舊設定。', 'warn');
+                if (scanData?.ok) {
+                    await scanCurrentWorkspace({
+                        classesPathOverride: '',
+                        keepStep: currentStep !== 'load'
+                    });
+                }
+                return;
+            }
+            showToast(data.error || '未取得檔案授權，請再點選允許', 'warn');
+            return;
+        }
+        if (dirtyCanvasStem) {
+            const flushed = await flushUnsavedCanvasDraftIfNeeded();
+            if (!flushed) return;
+        }
+        document.getElementById('inputClassesPath').value = data.path || '';
+        await scanCurrentWorkspace({
+            classesPathOverride: data.path || '',
+            keepStep: currentStep !== 'load'
+        });
+        showToast(`已重新授權共用類別檔：${data.file_name || 'classes.txt'}`, 'success');
+    } catch (e) {
+        showToast('授權共用類別檔失敗', 'error');
+    }
+}
+
+async function useLastSharedClassesForCurrentFolder() {
+    if (!scanData?.ok) return;
+    if (window.YoloWebEngine?.isActive()) {
+        await authorizeAndApplySharedClasses();
+        return;
+    }
+    const cfg = loadLocalSharedClassesCfg();
+    if (!cfg.path) {
+        showToast('找不到先前的共用類別檔記錄，請改用「挑選現有檔案」。', 'warn');
+        return;
+    }
+    const boundSet = new Set(cfg.boundWorkspaces || []);
+    if (scanData.image_dir) boundSet.add(scanData.image_dir);
+    saveLocalSharedClassesCfg({
+        ...cfg,
+        boundWorkspaces: Array.from(boundSet)
+    });
+    if (activeModal && activeModal.id === 'sharedClassesSetupModal') {
+        closeModal('sharedClassesSetupModal');
+    }
+    await scanCurrentWorkspace({
+        classesPathOverride: cfg.path,
+        keepStep: currentStep !== 'load'
+    });
+    showToast(`已沿用共用類別檔：${cfg.fileName || 'classes.txt'}`, 'success');
+}
+
+async function toggleLockSharedClasses(checked) {
+    const lockOverride = Boolean(checked);
+    if (window.YoloWebEngine?.isActive()) {
+        await fetch('/api/shared_classes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'set_lock', lock_override: lockOverride })
+        });
+    } else {
+        const cfg = loadLocalSharedClassesCfg();
+        cfg.lockOverride = lockOverride;
+        saveLocalSharedClassesCfg(cfg);
+    }
+    if (scanData?.ok) {
+        document.getElementById('inputClassesPath').value = '';
+        await scanCurrentWorkspace({
+            classesPathOverride: '',
+            keepStep: currentStep !== 'load'
+        });
+    }
+    showToast(lockOverride ? '已設定優先使用共用類別檔' : '已改回尊重資料夾既有類別檔', 'info');
+}
+
+async function clearSharedClassesBinding() {
+    if (dirtyCanvasStem) {
+        const flushed = await flushUnsavedCanvasDraftIfNeeded();
+        if (!flushed) return;
+    }
+    if (window.YoloWebEngine?.isActive()) {
+        await fetch('/api/shared_classes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'clear' })
+        });
+    } else {
+        saveLocalSharedClassesCfg({ path: '', fileName: '', lockOverride: false, boundWorkspaces: [] });
+    }
+    document.getElementById('inputClassesPath').value = '';
+    if (scanData?.ok) {
+        await scanCurrentWorkspace({
+            classesPathOverride: '',
+            keepStep: currentStep !== 'load'
+        });
+    }
+    showToast('已解除共用類別檔綁定，改用資料夾內本機類別檔', 'info');
+}
 
 async function rescanFromLoadedSettings() {
     if (dirtyCanvasStem) {
@@ -302,8 +978,10 @@ async function rescanFromLoadedSettings() {
     if (dirLoaded) {
         document.getElementById('inputImageDir').value = dirLoaded;
     }
+    if (activeModal && activeModal.id === 'pathSettingsModal') {
+        closeModal('pathSettingsModal');
+    }
     await scanCurrentWorkspace();
-    if (scanData?.ok) closeModal('pathSettingsModal');
 }
 
 let scanRequestId = 0;
@@ -312,11 +990,11 @@ async function scanCurrentWorkspace(options = {}) {
     if (options.refreshBoundWorkspace && pendingWorkspaceScan) return;
     const bound = options.refreshBoundWorkspace ? scanData : null;
     const imgDir = bound?.image_dir || (document.getElementById('inputImageDir').value || '').trim();
-    const sameFolder = document.getElementById('chkSameFolder').checked;
-    let lblDir = bound?.label_dir || (sameFolder ? imgDir : (document.getElementById('inputLabelDir').value || '').trim());
-    let clsPath = bound?.classes_path ?? (document.getElementById('inputClassesPath').value || '').trim();
-    if (scanData && imgDir !== scanData.image_dir) {
-        if (lblDir === scanData.label_dir) lblDir = imgDir;
+    const lblDir = imgDir;
+    let clsPath = options.classesPathOverride !== undefined
+        ? options.classesPathOverride
+        : (bound?.classes_path ?? (document.getElementById('inputClassesPath').value || '').trim());
+    if (options.classesPathOverride === undefined && scanData && imgDir !== scanData.image_dir) {
         if (clsPath === scanData.classes_path) clsPath = '';
     }
 
@@ -331,13 +1009,17 @@ async function scanCurrentWorkspace(options = {}) {
     status.hidden = false;
     status.textContent = '正在掃描照片與標記檔…';
     try {
+        const localSharedCfg = loadLocalSharedClassesCfg();
         const res = await fetch('/api/scan', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 image_dir: imgDir,
                 label_dir: lblDir,
-                classes_path: clsPath
+                classes_path: clsPath,
+                shared_classes_path: localSharedCfg.path || '',
+                lock_shared_classes: Boolean(localSharedCfg.lockOverride),
+                shared_bound_workspaces: localSharedCfg.boundWorkspaces || []
             })
         });
         const data = await res.json();
@@ -348,12 +1030,14 @@ async function scanCurrentWorkspace(options = {}) {
             return;
         }
 
+        const prevScanData = scanData;
         if (scanData?.workspace_id !== data.workspace_id) {
             masterStem = null;
             activeStem = null;
             copySelectedStems.clear();
             reviewQueue = [];
             similarityMap = {};
+            simBannerState = { active: false, warnings: [] };
             recommendedGroups = [];
             currentFilter = 'all';
             document.getElementById('searchInput').value = '';
@@ -363,6 +1047,8 @@ async function scanCurrentWorkspace(options = {}) {
             });
             invalidateRemapPreview();
             document.getElementById('applySuccessBanner').style.display = 'none';
+            const recBar = document.getElementById('recommendedGroupsBar');
+            if (recBar) recBar.style.display = 'none';
             document.getElementById('inputCopyOutputDir').value = '';
             document.getElementById('chkOverwriteExisting').checked = false;
             canvasImageRequest++;
@@ -377,12 +1063,27 @@ async function scanCurrentWorkspace(options = {}) {
             selectedBoxIndex = -1;
         }
         scanData = data;
+        if (!scanData.shared_classes_info && !window.YoloWebEngine?.isActive()) {
+            scanData.shared_classes_info = computePythonSharedClassesInfo(scanData, prevScanData?.shared_classes_info);
+        }
+        if (scanData.shared_classes_info?.missing_file) {
+            const missingName = scanData.shared_classes_info.file_name || 'classes.txt';
+            if (!window.YoloWebEngine?.isActive()) {
+                saveLocalSharedClassesCfg({ path: '', fileName: '', lockOverride: false, boundWorkspaces: [] });
+            }
+            scanData.shared_classes_info.has_binding = false;
+            scanData.shared_classes_info.active = false;
+            scanData.shared_classes_info.missing_file = false;
+            scanData.shared_classes_info.needs_permission = false;
+            if (scanData.classes_path && !scanData.classes_file_exists) {
+                scanData.classes_path = '';
+            }
+            showToast(`原本共用的「${missingName}」已被刪除或移動，已自動清除舊設定，請重新選擇類別檔。`, 'warn');
+        }
+        recordPrevFolderClassesHint(scanData);
         status.hidden = true;
         document.getElementById('inputImageDir').value = data.image_dir;
         document.getElementById('inputImageDirLoaded').value = data.image_dir;
-        document.getElementById('inputLabelDir').value = data.label_dir;
-        document.getElementById('chkSameFolder').checked = data.image_dir === data.label_dir;
-        toggleSameFolderMode();
         document.getElementById('inputClassesPath').value = data.classes_path || '';
 
         // 切換歡迎頁 -> 載入後摘要頁
@@ -433,9 +1134,6 @@ async function scanCurrentWorkspace(options = {}) {
         } else {
             reviewScope = 'all';
             switchStep('review');
-            if (!options.refreshBoundWorkspace && typeof maybePromptGuidedTour === 'function') {
-                setTimeout(() => maybePromptGuidedTour('post_load'), 260);
-            }
         }
     } catch (err) {
         console.error(err);
@@ -453,6 +1151,9 @@ async function scanCurrentWorkspace(options = {}) {
 // ============================================================================
 function updateHeaderAndNavBadges() {
     if (!scanData || !scanData.ok) return;
+    if (!scanData.shared_classes_info && !window.YoloWebEngine?.isActive()) {
+        scanData.shared_classes_info = computePythonSharedClassesInfo(scanData);
+    }
     const s = scanData.summary;
 
     // 頁首只顯示資料夾名稱，完整路徑收進彈窗
@@ -463,7 +1164,6 @@ function updateHeaderAndNavBadges() {
     folderBtn.title = `完整路徑：${scanData.image_dir} (點擊查看詳情)`;
 
     document.getElementById('detailFullImageDir').textContent = scanData.image_dir || '';
-    document.getElementById('detailFullLabelDir').textContent = scanData.label_dir || '';
     document.getElementById('detailFullClassesPath').textContent = scanData.classes_path || '（未找到 classes.txt）';
 
     // 啟用步驟與工具按鈕
@@ -494,6 +1194,7 @@ function updateHeaderAndNavBadges() {
     } else {
         badgePending.style.display = 'none';
     }
+    renderSharedClassesGuidance();
 }
 
 function renderLoadStepSummary() {
@@ -515,23 +1216,23 @@ function renderLoadStepSummary() {
         headlineEl.textContent = '沒有找到照片';
         subtextEl.textContent = '';
         btnsEl.innerHTML = `
-            <button class="btn btn-primary btn-lg" onclick="pickAndLoadFolder()">重新選擇照片資料夾</button>
+            <button class="btn btn-primary btn-lg" onclick="pickAndLoadFolder()">重選資料夾</button>
         `;
     } else if (s.reference_candidate_count === 0) {
         headlineEl.textContent = `缺少參考照片`;
         subtextEl.textContent = '請先標記一張照片。';
         btnsEl.innerHTML = `
-            <button class="btn btn-primary btn-lg" onclick="startLabelingFirstPhoto()">前往畫布先標記第 1 張照片</button>
-            <button class="btn btn-secondary" onclick="switchStep('review')">進入檢查與微調檢視照片</button>
+            <button class="btn btn-primary btn-lg" onclick="startLabelingFirstPhoto()">標記第 1 張照片</button>
+            <button class="btn btn-secondary" onclick="switchStep('review')">前往檢視照片</button>
         `;
     } else if (s.unlabeled_count > 0) {
         headlineEl.textContent = `${s.unlabeled_count} 張未標記`;
         subtextEl.textContent = `共 ${s.photo_count} 張照片`;
         btnsEl.innerHTML = `
             <button class="btn btn-primary btn-xl" onclick="startBatchApplyForUnlabeled()">
-                選擇要套用的照片 →
+                前往批次套用 →
             </button>
-            <button class="btn btn-secondary" onclick="switchStep('review')">直接進入檢查與微調</button>
+            <button class="btn btn-secondary" onclick="switchStep('review')">直接檢視照片</button>
         `;
     } else if (s.pending_review_count + s.needs_fix_count > 0) {
         const todoCnt = s.pending_review_count + s.needs_fix_count;
@@ -539,7 +1240,7 @@ function renderLoadStepSummary() {
         subtextEl.textContent = `共 ${s.photo_count} 張照片`;
         btnsEl.innerHTML = `
             <button class="btn btn-primary btn-xl" onclick="startReviewForPendingItems()">
-                開始檢查這 ${todoCnt} 張 →
+                檢查這 ${todoCnt} 張 →
             </button>
             <button class="btn btn-secondary" onclick="switchStep('apply')">前往批次套用</button>
         `;
@@ -547,7 +1248,7 @@ function renderLoadStepSummary() {
         headlineEl.textContent = `已確認全部 ${s.photo_count} 張`;
         subtextEl.textContent = ``;
         btnsEl.innerHTML = `
-            <button class="btn btn-secondary" onclick="switchStep('review')">進入檢查與微調</button>
+            <button class="btn btn-secondary" onclick="switchStep('review')">檢視照片</button>
         `;
     }
 
@@ -593,7 +1294,7 @@ function renderIssueGroups(groups) {
             return `
                 <div class="issue-file-row">
                     <span><strong>${escapeHtml(fname)}</strong> <span class="muted-text">(${escapeHtml(statusText)})</span></span>
-                    <button class="btn-xs" onclick="jumpToSingleItemInReview('${escapeJsStr(st)}')">檢視此張</button>
+                    <button class="btn-xs" onclick="jumpToSingleItemInReview('${escapeJsStr(st)}')">檢視</button>
                 </div>
             `;
         }).join('');
@@ -686,7 +1387,6 @@ function startLabelingFirstPhoto() {
     activeStem = firstPhoto.stem;
     switchStep('review');
     toggleDrawBoxMode(true);
-    showToast('已開啟「＋ 新增框 (W)」模式，請直接在畫布拖曳拉出標記框', 'info');
 }
 
 // ============================================================================
@@ -709,7 +1409,7 @@ function renderReferenceSelector() {
             <div style="color:var(--status-red);font-weight:700;">
                 缺少可用的參考照片。
             </div>
-            <button class="btn btn-primary btn-sm" onclick="startLabelingFirstPhoto()">前往畫布標記第 1 張照片</button>
+            <button class="btn btn-primary btn-sm" onclick="startLabelingFirstPhoto()">標記第 1 張照片</button>
         `;
         return;
     }
@@ -822,12 +1522,37 @@ function buildCopyPhotoCardHtml(item) {
     `;
 }
 
+let simBannerState = { active: false, warnings: [] };
+
+function updateRecommendedGroupsStrip() {
+    const strip = document.getElementById('recommendedGroupsBar');
+    if (!strip) return;
+    if (!simBannerState.active) {
+        strip.style.display = 'none';
+        strip.innerHTML = '';
+        return;
+    }
+    const totalPhotos = (scanData?.items || []).filter(i => i.has_image).length;
+    strip.style.display = 'flex';
+    strip.innerHTML = `
+        <span style="font-weight:700;color:var(--status-amber);">
+            已選 ${copySelectedStems.size} / ${totalPhotos} 張相似照片。
+        </span>
+    `;
+    if (Array.isArray(simBannerState.warnings) && simBannerState.warnings.length) {
+        strip.innerHTML += `<span class="text-amber">${escapeHtml(simBannerState.warnings.join('；'))}</span>`;
+    }
+}
+
 function renderCopyPhotoGrid(resetCount = true) {
     const grid = document.getElementById('copyPhotoGrid');
+    const photos = (scanData.items || []).filter(i => i.has_image);
     document.getElementById('copyTargetCount').textContent = copySelectedStems.size;
+    const totalCountEl = document.getElementById('copyTotalPhotoCount');
+    if (totalCountEl) totalCountEl.textContent = photos.length;
+    updateRecommendedGroupsStrip();
 
     const focusedStem = document.activeElement?.dataset?.copyStem;
-    const photos = (scanData.items || []).filter(i => i.has_image);
     const vThreshold = window.YOLO_SHARED_RULES?.thresholds?.virtual_list_threshold || 150;
 
     if (photos.length <= vThreshold) {
@@ -940,17 +1665,7 @@ async function runSimilarPhotoFinder() {
             }
         });
 
-        const strip = document.getElementById('recommendedGroupsBar');
-        strip.style.display = 'flex';
-        strip.innerHTML = `
-            <span style="font-weight:700;color:var(--status-amber);">
-                已選 ${copySelectedStems.size} / ${matchedStems.length} 張相似照片。
-            </span>
-        `;
-
-        if (data.warnings?.length) {
-            strip.innerHTML += `<span class="text-amber">${escapeHtml(data.warnings.join('；'))}</span>`;
-        }
+        simBannerState = { active: true, warnings: Array.isArray(data.warnings) ? data.warnings : [] };
         renderCopyPhotoGrid();
         runMasterCopyPreview();
     } catch (e) {
@@ -1046,7 +1761,7 @@ async function runMasterCopyPreview() {
         summaryBox.innerHTML = `<strong>新增 ${sum.will_create_count} · 覆蓋 ${sum.will_overwrite_count} · 略過 ${sum.will_skip_count}</strong>
             <div class="muted-text">既有標記：${payload.overwrite ? '允許覆蓋（原檔會備份）' : '保留'}</div>
             <details class="output-path"><summary>輸出：${escapeHtml(data.output_dir_name || scanData.folder_name)}</summary>
-                <div class="full-file-name">${escapeHtml(payload.output_dir || scanData.label_dir || scanData.image_dir || data.output_dir_name)}</div></details>`;
+                <div class="full-file-name">${escapeHtml(payload.output_dir || scanData.image_dir || data.output_dir_name)}</div></details>`;
         previewContainer.innerHTML = renderWritePreview(data.preview_items);
         const blocking = data.blocking_reasons || [];
         if (willApplyCnt > 0 && !blocking.length) {
@@ -1145,7 +1860,7 @@ async function runMasterCopyExecute() {
                 ${failures ? `<ul class="copy-failure-list">${failures}</ul><p>修正後可重試失敗項目。</p>` : ''}
             </div>
             ${canReview
-                ? `<button class="btn btn-primary" onclick="startReviewQueueNow()">檢查已寫入的 ${processedStems.length} 張</button>`
+                ? `<button class="btn btn-primary" onclick="startReviewQueueNow()">檢查這 ${processedStems.length} 張</button>`
                 : `<button class="btn btn-secondary" onclick="openInExplorer('copyResultPath')">開啟輸出資料夾</button>`}
         `;
     } catch {
@@ -1499,17 +2214,17 @@ function updateSaveIndicator(state, message, retry) {
     el.disabled = (state !== 'error' && state !== 'unsaved');
     if (state === 'saved') {
         el.textContent = message || '[✓] 已儲存';
-        el.title = '標記已安全寫入檔案';
+        el.title = '已儲存';
     } else if (state === 'saving') {
         el.textContent = message || '[...] 儲存中';
-        el.title = '正在寫入檔案…';
+        el.title = '儲存中…';
     } else if (state === 'unsaved') {
         el.textContent = message || '[●] 尚未儲存（按 C 確認儲存）';
-        el.title = '畫布微調先暫存於記憶體以維持流暢操作；按「確認並下一張 (C)」即一次正式儲存，或點擊此處立即暫存草稿。';
+        el.title = '點擊暫存草稿，或按 C 確認儲存';
         el.onclick = () => flushUnsavedCanvasDraftIfNeeded();
     } else if (state === 'error') {
         el.textContent = message || '[✕] 儲存失敗（點擊重試）';
-        el.title = '點擊重新嘗試寫入檔案';
+        el.title = '點擊重試儲存';
         el.onclick = retry || (() => retryLastFailedSave());
     }
 }
@@ -1611,10 +2326,10 @@ function renderInspectorAndCanvas() {
     const metaEl = document.getElementById('itemMetaDetails');
     metaEl.innerHTML = `
         <div class="meta-kv"><span class="muted-text">檔案名稱</span><strong>${escapeHtml(item.image_name || item.label_name)}</strong></div>
-        <div class="meta-kv"><span class="muted-text">人工審核狀態</span><strong>${escapeHtml(item.review_label)}</strong></div>
-        <div class="meta-kv"><span class="muted-text">格式檢查狀態</span><strong>${escapeHtml(item.format_label)}</strong></div>
-        <div class="meta-kv"><span class="muted-text">影像解析度</span><span>${item.img_width} × ${item.img_height}</span></div>
-        <div class="meta-kv"><span class="muted-text">參考照片來源</span><span>${escapeHtml(item.source_master || '原始標記 / 非複製')}</span></div>
+        <div class="meta-kv"><span class="muted-text">檢查進度</span><strong>${escapeHtml(item.review_label)}</strong></div>
+        <div class="meta-kv"><span class="muted-text">標記狀態</span><strong>${escapeHtml(item.format_label)}</strong></div>
+        <div class="meta-kv"><span class="muted-text">照片尺寸</span><span>${item.img_width} × ${item.img_height}</span></div>
+        <div class="meta-kv"><span class="muted-text">套用範本</span><span>${escapeHtml(item.source_master || '手動標記')}</span></div>
     `;
 
     // 右側診斷訊息
@@ -1622,7 +2337,7 @@ function renderInspectorAndCanvas() {
     if (!item.issues || item.issues.length === 0) {
         issuesEl.innerHTML = `
             <div style="color:var(--status-green);font-weight:600;">
-                [✓] 格式與座標檢查正常（共 ${item.box_count} 個標記框）
+                [✓] 檢查正常（共 ${item.box_count} 個框）
             </div>
         `;
     } else {
@@ -1685,7 +2400,7 @@ function renderInspectorAndCanvas() {
                         </span>
                         ${inlineClsSelect}
                     </div>
-                    ${isSel ? `<div class="box-properties">類別 ID ${b.class_id} · 寬 ${(b.w * 100).toFixed(1)}%／高 ${(b.h * 100).toFixed(1)}%（影像比例）</div>` : ''}
+                    ${isSel ? `<div class="box-properties">編號 ${b.class_id} · 寬 ${(b.w * 100).toFixed(1)}% × 高 ${(b.h * 100).toFixed(1)}%</div>` : ''}
                 </div>
             `;
         }).join('');
@@ -1768,11 +2483,11 @@ function updateNewBoxClassPreview() {
     const matched = defined.find(c => c.name === val);
 
     if (matched) {
-        previewEl.textContent = `將使用既有類別 ID #${matched.id}：「${matched.name}」`;
+        previewEl.textContent = `將使用類別 #${matched.id}：${matched.name}`;
     } else if (val) {
-        previewEl.textContent = `將新增為新類別 ID #${nextId}：「${val}」（並自動追加至 classes.txt）`;
+        previewEl.textContent = `將新增為類別 #${nextId}：${val}`;
     } else {
-        previewEl.textContent = `將建立新類別 ID #${nextId}（輸入名稱後自動追加至 classes.txt）`;
+        previewEl.textContent = '';
     }
 }
 
@@ -1803,7 +2518,44 @@ function cancelNewBoxClassModal() {
     renderInspectorAndCanvas();
 }
 
+let isSavingNewClass = false;
+
+async function persistClassesImmediately(classesList) {
+    const normalized = Array.isArray(classesList)
+        ? classesList.map((c, idx) => String(c || '').trim() || `class_${idx}`)
+        : [];
+    try {
+        const res = await workspaceFetch('/api/save_classes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ classes: normalized })
+        });
+        const data = await res.json();
+        if (!data || !data.ok) {
+            showToast(data?.error || '儲存新類別失敗，請確認檔案權限', 'error');
+            return false;
+        }
+        scanData.classes = Array.isArray(data.classes) ? data.classes : normalized;
+        if ('classes_file_exists' in data) {
+            scanData.classes_file_exists = Boolean(data.classes_file_exists);
+        }
+        if (data.classes_path) {
+            scanData.classes_path = data.classes_path;
+            const clsInputEl = document.getElementById('inputClassesPath');
+            if (clsInputEl) clsInputEl.value = data.classes_path;
+        }
+        if ('shared_classes_active' in data && scanData.shared_classes_info) {
+            scanData.shared_classes_info.active = Boolean(data.shared_classes_active);
+        }
+        return true;
+    } catch (_) {
+        showToast('儲存新類別失敗，請確認連線或檔案狀態', 'error');
+        return false;
+    }
+}
+
 async function confirmNewBoxClassModal() {
+    if (isSavingNewClass) return;
     const inputEl = document.getElementById('inputNewBoxClassName');
     const rawName = (inputEl?.value || '').trim();
     if (!rawName) {
@@ -1823,16 +2575,40 @@ async function confirmNewBoxClassModal() {
     const matched = defined.find(c => c.name === rawName);
     let targetId;
     let targetName;
+    let isBrandNewClass = false;
+    const prevClasses = Array.isArray(scanData.classes) ? [...scanData.classes] : [];
+    const prevClassesExists = Boolean(scanData.classes_file_exists);
+    const prevClassesPath = scanData.classes_path || '';
+
     if (matched) {
         targetId = matched.id;
         targetName = matched.name;
     } else {
+        isBrandNewClass = true;
         targetId = defined.length > 0 ? Math.max(...defined.map(c => c.id)) + 1 : 0;
         targetName = rawName;
         if (!Array.isArray(scanData.classes)) {
             scanData.classes = [];
         }
+        for (let i = 0; i <= targetId; i++) {
+            if (!scanData.classes[i]) {
+                scanData.classes[i] = i === targetId ? targetName : `class_${i}`;
+            }
+        }
         scanData.classes[targetId] = targetName;
+
+        isSavingNewClass = true;
+        try {
+            const ok = await persistClassesImmediately(scanData.classes);
+            if (!ok) {
+                scanData.classes = prevClasses;
+                scanData.classes_file_exists = prevClassesExists;
+                scanData.classes_path = prevClassesPath;
+                return;
+            }
+        } finally {
+            isSavingNewClass = false;
+        }
     }
 
     if (!Array.isArray(item.boxes)) item.boxes = [];
@@ -1864,6 +2640,12 @@ async function confirmNewBoxClassModal() {
     pendingClassEditBoxIdx = -1;
     closeModal('newBoxClassModal');
     markCanvasDraftDirty(item, snap);
+    if (isBrandNewClass) {
+        renderClassRemapEditor();
+        recordPrevFolderClassesHint(scanData);
+        showToast(`已新增類別「${targetName}」`, 'success');
+    }
+    renderSharedClassesGuidance();
 }
 
 function toggleDrawBoxMode(forceState) {
@@ -2863,7 +3645,6 @@ function snapshotItemForUndo(item) {
     return {
         stem: item.stem,
         boxes: JSON.parse(JSON.stringify(item.boxes || [])),
-        classes: Array.isArray(scanData?.classes) ? [...scanData.classes] : [],
         box_count: item.box_count,
         review_state: item.review_state,
         review_status: item.review_status,
@@ -2881,9 +3662,6 @@ function snapshotItemForUndo(item) {
 function restoreItemFromUndoSnapshot(item, snap) {
     if (!item || !snap) return;
     item.boxes = JSON.parse(JSON.stringify(snap.boxes || []));
-    if (Array.isArray(snap.classes)) {
-        scanData.classes = [...snap.classes];
-    }
     item.box_count = snap.box_count ?? item.boxes.length;
     item.review_state = snap.review_state;
     item.review_status = snap.review_status;
@@ -3024,6 +3802,9 @@ function applySingleSavePatch(data) {
     if (data.classes_path) {
         scanData.classes_path = data.classes_path;
     }
+    if ('shared_classes_active' in data && scanData.shared_classes_info) {
+        scanData.shared_classes_info.active = Boolean(data.shared_classes_active);
+    }
     if (data.last_backup) {
         scanData.last_backup = data.last_backup;
     }
@@ -3041,6 +3822,8 @@ function applySingleSavePatch(data) {
     }
 
     recomputeClientSummaryCounts();
+    recordPrevFolderClassesHint(scanData);
+    renderSharedClassesGuidance();
 }
 
 async function nudgeSelectedBoxOnCanvas(dxPixels, dyPixels) {
@@ -3489,6 +4272,8 @@ function handleModalKey(event) {
         event.preventDefault();
         if (activeModal.id === 'newBoxClassModal') {
             cancelNewBoxClassModal();
+        } else if (activeModal.id === 'sharedClassesSetupModal') {
+            dismissSharedClassesGuide();
         } else {
             closeModal(activeModal.id);
         }
@@ -3545,6 +4330,18 @@ function renderClassRemapEditor() {
     const wrap = document.getElementById('classRemapEditorWrap');
     if (!wrap || !scanData || !scanData.ok) return;
 
+    const sharedWarnEl = document.getElementById('remapSharedClassesWarning');
+    if (sharedWarnEl) {
+        const sInfo = scanData.shared_classes_info;
+        if (sInfo && sInfo.active) {
+            sharedWarnEl.style.display = 'block';
+            sharedWarnEl.innerHTML = `⚠️ 共用模式建議只改名稱；合併或刪除不會同步更新其他資料夾的標記檔。`;
+        } else {
+            sharedWarnEl.style.display = 'none';
+            sharedWarnEl.innerHTML = '';
+        }
+    }
+
     const usedClassIds = new Set();
     scanData.classes.forEach((_, idx) => usedClassIds.add(idx));
     scanData.items.forEach(item => {
@@ -3585,8 +4382,8 @@ function renderClassRemapEditor() {
                 <td class="remap-col-action">
                     <div class="remap-action-seg" role="group" aria-label="類別 ${cid} 的處理動作">
                         <button type="button" class="remap-seg-btn active" data-act="keep" aria-pressed="true" onclick="setRemapRowAction(this, 'keep')">改名／保留</button>
-                        <button type="button" class="remap-seg-btn" data-act="merge" aria-pressed="false"${canMerge ? '' : ' disabled title="至少需有 2 個類別才能合併"'} onclick="setRemapRowAction(this, 'merge')">合併到其他類別</button>
-                        <button type="button" class="remap-seg-btn remap-seg-danger" data-act="delete" aria-pressed="false" onclick="setRemapRowAction(this, 'delete')">刪除此類別</button>
+                        <button type="button" class="remap-seg-btn" data-act="merge" aria-pressed="false"${canMerge ? '' : ' disabled title="至少需有 2 個類別才能合併"'} onclick="setRemapRowAction(this, 'merge')">合併</button>
+                        <button type="button" class="remap-seg-btn remap-seg-danger" data-act="delete" aria-pressed="false" onclick="setRemapRowAction(this, 'delete')">刪除</button>
                     </div>
                 </td>
                 <td class="remap-col-setting">
@@ -3881,7 +4678,6 @@ async function handleUndoLast() {
                 dirtyCanvasOrigState = null;
             } else {
                 curItem.boxes = JSON.parse(JSON.stringify(snap.boxes || []));
-                if (Array.isArray(snap.classes)) scanData.classes = [...snap.classes];
                 syncItemLocalDraftState(curItem);
             }
             if (selectedBoxIndex >= (curItem.boxes?.length || 0)) {
@@ -4096,10 +4892,10 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '#canvasViewport',
                 pulseTag: '步驟 3 · 調整標記框',
                 title: '3. 拖曳與微調標記框',
-                desc: '點擊標記框可直接拖曳移動，或拉動周圍 8 個白點調整大小；調整完按 C 確認後才正式存檔。',
-                tip: '💡 選取標記框後按方向鍵 ↑↓←→ 可微調 1 像素；直接切換照片也會自動存為草稿。',
+                desc: '點擊標記框可拖曳移動，或拉動周圍白點調整大小；調整完按 C 確認並儲存。',
+                tip: '💡 按方向鍵 ↑↓←→ 可每次移動 1 像素；直接換張會自動存成草稿。',
                 demoHtml: `
-                    <div class="tour-demo-header"><span>▶ 操作示範：順暢微調，按 C 一次儲存</span><span>0 延遲預覽</span></div>
+                    <div class="tour-demo-header"><span>▶ 操作示範：拖曳與調整框大小</span><span>按 C 確認儲存</span></div>
                     <div class="tour-demo-visual">
                         <div class="demo-Resize-box">
                             <span class="demo-handle tl"></span><span class="demo-handle tc"></span><span class="demo-handle tr"></span>
@@ -4114,7 +4910,7 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '.review-mode-bar',
                 pulseTag: '步驟 4 · 比對與放大鏡',
                 title: '4. 並排比較與放大鏡',
-                desc: '點選「並排比較 (V)」可與參考照片左右對照；開啟「🔍 放大鏡 (M)」可在拉框時放大檢視邊緣。',
+                desc: '點選「並排比較 (V)」可與參考照片對照；開啟「🔍 放大鏡 (M)」可放大檢視框線邊緣。',
                 tip: '💡 按住 Ctrl + 滑鼠滾輪可自由放大或縮小畫面。',
                 demoHtml: `
                     <div class="tour-demo-header"><span>▶ 操作示範：游標處 4 倍放大鏡</span><span>快捷鍵 M / V</span></div>
@@ -4128,8 +4924,8 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '#pinnedBoxesSidebar',
                 pulseTag: '步驟 5 · 新增與管理標記框',
                 title: '5. 新增、複製與刪除標記框',
-                desc: '點選「＋ 新增框 (W)」即可在畫布拖曳畫出新框；選取標記框後可複製 (B)、刪除 (Del) 或更改類別。',
-                tip: '💡 新增框放開滑鼠後，可直接點選既有類別或輸入新類別名稱。',
+                desc: '點選「＋ 新增框 (W)」可在畫布拉出新框；選取標記框後可複製 (B)、刪除 (Del) 或更換類別。',
+                tip: '💡 輸入新類別名稱後會馬上存檔；要改名或刪除請點上方「類別修正」。',
                 demoHtml: `
                     <div class="tour-demo-header"><span>▶ 操作示範：新增、複製與刪除工具</span><span>快捷鍵 W / B / Del</span></div>
                     <div class="tour-demo-visual">
@@ -4212,7 +5008,7 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '.advanced-apply-details',
                 pulseTag: '步驟 3 · 檢查套用設定',
                 title: '3. 檢查對齊與覆蓋設定',
-                desc: '「智慧局部對齊」會配合照片中物體的微幅移動，自動微調標記框位置；預設不會覆蓋已有標記的照片。',
+                desc: '開啟「智慧局部對齊」時，就算物體位置稍微移動，也會自動幫您把框對齊。',
                 tip: '⚠️ 注意：若勾選「覆蓋既有標記」，原標記會被取代（系統會自動備份）。',
                 onEnter() {
                     const details = document.querySelector('.advanced-apply-details');
@@ -4308,13 +5104,18 @@ function handleTourPromptChoice(choice) {
 }
 
 function openGuidedTourLauncher() {
-    openModal('guidedTourLauncherModal');
+    if (!scanData || !scanData.ok || !scanData.summary || scanData.summary.photo_count === 0) {
+        showToast('請先載入照片資料夾', 'info');
+        return;
+    }
+    const targetTour = currentStep === 'apply' ? 'batch_apply' : 'post_load';
+    startGuidedTour(targetTour);
 }
 
 function startGuidedTourFromLauncher(tourType) {
     closeModal('guidedTourLauncherModal');
     if (!scanData || !scanData.ok || !scanData.summary || scanData.summary.photo_count === 0) {
-        showToast('請先選擇並載入照片資料夾，即可針對實際作業畫面進行動態操作指引！', 'info');
+        showToast('請先載入照片資料夾', 'info');
         return;
     }
     startGuidedTour(tourType);
@@ -4362,19 +5163,14 @@ function markCurrentTourHideToday() {
     if (!activeTourType) return;
     setTourDailyState(activeTourType, 'hide_today');
     endGuidedTour('hide_today');
-    showToast('已設定今日不再自動顯示此指引（需要時可點選頁首「🎓 操作指引」查看）。', 'info');
 }
 
 function endGuidedTour(reason = 'closed') {
     runTourStepCleanups();
     const overlay = document.getElementById('guidedTourOverlay');
     if (overlay) overlay.style.display = 'none';
-    const finishedType = activeTourType;
     activeTourType = null;
     activeTourStepIdx = 0;
-    if (reason === 'completed' && finishedType) {
-        showToast('操作指引已完成！需要時可隨時點選頁首「🎓 操作指引」重新查看。', 'success');
-    }
 }
 
 function renderCurrentGuidedTourStep() {
