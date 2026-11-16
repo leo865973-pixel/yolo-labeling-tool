@@ -1995,6 +1995,12 @@ button:disabled { cursor: not-allowed; }
     color: #7D6608;
     border: 2px solid #F39C12;
 }
+.save-badge.unsaved {
+    background: #FEF3C7;
+    color: #92400E;
+    border: 2px solid #F59E0B;
+    cursor: pointer;
+}
 .save-badge.error {
     background: #FADBD8;
     color: #78281F;

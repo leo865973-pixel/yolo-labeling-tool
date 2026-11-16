@@ -2212,6 +2212,7 @@
 
         const classesInfo = await parseClassesFromProvider(labelProvider, imageProvider, activeState.classesPath);
         const currentClassMap = { ...classesInfo.class_map };
+        const definedClasses = Array.isArray(payload.defined_classes) ? payload.defined_classes : [];
         let classesModified = false;
 
         try {
@@ -2220,10 +2221,17 @@
                 if (!Number.isInteger(cid) || cid < 0) throw new Error('類別編號必須為非負整數');
                 const cname = String(b.class_name || '').trim();
                 if (!Object.prototype.hasOwnProperty.call(currentClassMap, cid)) {
-                    if (cname && cid === Object.keys(currentClassMap).length) {
+                    const curLen = Object.keys(currentClassMap).length;
+                    if (cname && cid === curLen) {
                         currentClassMap[cid] = cname;
                         classesModified = true;
-                    } else if (Object.keys(currentClassMap).length > 0) {
+                    } else if (definedClasses.length > cid && String(definedClasses[cid] || '').trim()) {
+                        for (let k = curLen; k <= cid; k++) {
+                            const kName = String(definedClasses[k] || '').trim() || `class_${k}`;
+                            currentClassMap[k] = kName;
+                        }
+                        classesModified = true;
+                    } else if (curLen > 0) {
                         throw new Error('類別編號不在類別檔範圍內');
                     }
                 }
@@ -2285,36 +2293,95 @@
         const content = lines.join('\n') + (lines.length > 0 ? '\n' : '');
         await labelProvider.writeTextFile(filename, content);
 
+        const totalCls = Object.keys(currentClassMap).length;
+        const orderedNames = [];
+        for (let i = 0; i < totalCls; i++) {
+            orderedNames.push(currentClassMap[i]);
+        }
         if (classesModified) {
-            const totalCls = Object.keys(currentClassMap).length;
-            const orderedNames = [];
-            for (let i = 0; i < totalCls; i++) {
-                orderedNames.push(currentClassMap[i]);
-            }
             const clsContent = orderedNames.join('\n') + (orderedNames.length > 0 ? '\n' : '');
             await labelProvider.writeTextFile(classesFilename, clsContent);
         }
 
         await labelProvider.writeBackupSnapshot(backupId, snapshot);
 
+        const parsedSingle = parseAndValidateYoloTxtContent(content, currentClassMap, totalCls > 0);
+        const currHash = computeNormalizedContentHash(content);
         const rec = itemRecords[stem] || {};
-        rec.review_state = '';
-        rec.confirmed_hash = '';
+        if (payload.confirm && !parsedSingle.has_blocking_error && lines.length > 0) {
+            rec.review_state = 'confirmed';
+            rec.confirmed_hash = currHash;
+        } else {
+            rec.review_state = '';
+            rec.confirmed_hash = '';
+        }
         rec.updated_at = nowStr();
         itemRecords[stem] = rec;
         state.last_backup_id = backupId;
-        await saveProjectState(labelProvider, state);
-        await appendAuditLog(labelProvider, {
-            op_type: `畫布微調儲存 (${stem}.txt)`,
+
+        const logs = Array.isArray(state.audit_logs) ? state.audit_logs : [];
+        logs.unshift({
+            op_type: payload.confirm ? `畫布確認並儲存 (${stem}.txt)` : `畫布草稿儲存 (${stem}.txt)`,
             backup_id: backupId,
-            box_count: lines.length
+            box_count: lines.length,
+            timestamp: nowStr()
         });
+        state.audit_logs = logs.slice(0, 100);
+        await saveProjectState(labelProvider, state);
+
+        if (payload.fast_single) {
+            const isConfirmed = rec.review_state === 'confirmed';
+            const hasBlocking = parsedSingle.has_blocking_error;
+            const hasWarn = parsedSingle.issues.some(i => i.level === 'warning');
+            const finalClassesPath = classesInfo.path || `${labelProvider.virtualPath}/${classesFilename}`;
+            if (classesModified && !classesInfo.path) activeState.classesPath = finalClassesPath;
+            return {
+                ok: true,
+                fast_single: true,
+                backup_id: backupId,
+                box_count: lines.length,
+                confirmed: isConfirmed,
+                classes: orderedNames,
+                classes_file_exists: classesModified ? true : classesInfo.exists,
+                classes_path: finalClassesPath,
+                last_backup: {
+                    backup_id: backupId,
+                    operation: 'canvas_box_edit',
+                    description: `畫布儲存 (${stem}.txt)`,
+                    timestamp: snapshot.timestamp
+                },
+                item_patch: {
+                    stem,
+                    label_name: filename,
+                    pair_type: 'paired',
+                    pair_label: parsedSingle.is_empty_file ? '空白標記檔 (0 框)' : '已配對',
+                    format_status: parsedSingle.format_status,
+                    format_label: parsedSingle.format_label,
+                    review_status: isConfirmed ? 'confirmed' : (hasBlocking ? 'needs_fix' : 'pending_review'),
+                    review_label: isConfirmed ? '已確認' : (hasBlocking ? '需修正' : '待人工確認'),
+                    review_state: isConfirmed ? 'confirmed' : (hasBlocking ? 'needs_refinement' : ''),
+                    has_blocking_error: hasBlocking,
+                    is_empty_file: parsedSingle.is_empty_file,
+                    is_valid_reference: parsedSingle.boxes.length > 0 && !hasBlocking,
+                    status: hasBlocking ? 'error' : (hasWarn ? 'warning' : 'pass'),
+                    box_count: parsedSingle.boxes.length,
+                    boxes: parsedSingle.boxes,
+                    content_hash: currHash,
+                    issues: parsedSingle.issues.map(iss => ({
+                        ...iss,
+                        message: iss.message || (iss.suggestion ? `${iss.reason}（${iss.suggestion}）` : iss.reason)
+                    })),
+                    has_label: true
+                }
+            };
+        }
 
         const nextScan = await performFullScan();
         return {
             ok: true,
             backup_id: backupId,
             box_count: lines.length,
+            confirmed: rec.review_state === 'confirmed',
             scan: nextScan
         };
     }

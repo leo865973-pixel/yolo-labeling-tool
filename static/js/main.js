@@ -63,6 +63,9 @@ let activeSavePromise = null;
 let reviewUpdatePending = false;
 let lastSaveFailed = false;
 let pendingSavePayload = null;
+let dirtyCanvasStem = null;
+let dirtyCanvasOrigState = null;
+let localCanvasUndoStack = [];
 
 const CLASS_COLORS = [
     '#2874A6', '#1E8449', '#D35400', '#8E44AD',
@@ -98,11 +101,22 @@ window.addEventListener('DOMContentLoaded', () => {
 // ============================================================================
 // 導覽切換與狀態保存
 // ============================================================================
-function switchStep(stepName) {
-    if (stepName === 'load' && scanData?.ok) { openModal('pathSettingsModal'); return; }
+async function switchStep(stepName) {
+    if (stepName === 'load' && scanData?.ok) {
+        if (dirtyCanvasStem) {
+            const flushed = await flushUnsavedCanvasDraftIfNeeded();
+            if (!flushed) return;
+        }
+        openModal('pathSettingsModal');
+        return;
+    }
     if (stepName !== 'load' && (!scanData || !scanData.ok)) {
         showToast('請先載入照片資料夾', 'warn');
         return;
+    }
+    if (stepName !== currentStep && dirtyCanvasStem) {
+        const flushed = await flushUnsavedCanvasDraftIfNeeded();
+        if (!flushed) return;
     }
     currentStep = stepName;
 
@@ -170,7 +184,13 @@ async function pickAndLoadFolder() {
         });
         const data = await res.json();
         if (data.ok && data.path) {
+            if (dirtyCanvasStem) {
+                await flushUnsavedCanvasDraftIfNeeded();
+            }
             // 重設前次範例或前次專案的殘留選擇狀態
+            dirtyCanvasStem = null;
+            dirtyCanvasOrigState = null;
+            localCanvasUndoStack = [];
             masterStem = null;
             copySelectedStems.clear();
             reviewQueue = [];
@@ -274,6 +294,10 @@ function toggleLoadSettingsPanel() { openModal('pathSettingsModal'); }
 
 
 async function rescanFromLoadedSettings() {
+    if (dirtyCanvasStem) {
+        const flushed = await flushUnsavedCanvasDraftIfNeeded();
+        if (!flushed) return;
+    }
     const dirLoaded = document.getElementById('inputImageDirLoaded').value.trim();
     if (dirLoaded) {
         document.getElementById('inputImageDir').value = dirLoaded;
@@ -346,6 +370,9 @@ async function scanCurrentWorkspace(options = {}) {
             activeSavePromise = null;
             pendingSavePayload = null;
             lastSaveFailed = false;
+            dirtyCanvasStem = null;
+            dirtyCanvasOrigState = null;
+            localCanvasUndoStack = [];
             dragAction = null;
             selectedBoxIndex = -1;
         }
@@ -444,7 +471,10 @@ function updateHeaderAndNavBadges() {
     document.getElementById('navBtnReview').disabled = (s.photo_count === 0);
     document.getElementById('btnUtilRemap').disabled = (s.photo_count === 0);
 
-    const hasUndo = Boolean(scanData.last_backup && scanData.last_backup.backup_id);
+    const hasUndo = Boolean(
+        (dirtyCanvasStem && localCanvasUndoStack.length > 0) ||
+        (scanData.last_backup && scanData.last_backup.backup_id)
+    );
     document.getElementById('btnQuickUndo').disabled = !hasUndo;
 
     // 導覽列數字提醒
@@ -1154,15 +1184,29 @@ function refreshReviewSelection() {
     renderStudioFileList();
     renderInspectorAndCanvas();
 }
-function applyReviewSearch() {
+async function applyReviewSearch() {
     if (!canChangeReviewSelection()) {
         document.getElementById('searchInput').value = appliedReviewSearch;
         return;
     }
+    if (dirtyCanvasStem) {
+        const nextList = getActiveReviewItemsList();
+        if (!nextList.some(i => i.stem === dirtyCanvasStem)) {
+            const flushed = await flushUnsavedCanvasDraftIfNeeded();
+            if (!flushed) {
+                document.getElementById('searchInput').value = appliedReviewSearch;
+                return;
+            }
+        }
+    }
     refreshReviewSelection();
 }
-function resetReviewFilters() {
+async function resetReviewFilters() {
     if (!canChangeReviewSelection()) return;
+    if (dirtyCanvasStem) {
+        const flushed = await flushUnsavedCanvasDraftIfNeeded();
+        if (!flushed) return;
+    }
     document.getElementById('searchInput').value = '';
     currentFilter = 'all';
     document.querySelectorAll('#allScopeFilterChips .f-chip').forEach(btn => {
@@ -1172,15 +1216,23 @@ function resetReviewFilters() {
     setReviewScope('all');
     document.getElementById('searchInput').focus();
 }
-function setReviewScope() {
+async function setReviewScope() {
     // 已取消「本次佇列／全部項目」分類：清單一律顯示全部照片，改由快速篩選縮小範圍
     if (!canChangeReviewSelection()) return;
+    if (dirtyCanvasStem) {
+        const flushed = await flushUnsavedCanvasDraftIfNeeded();
+        if (!flushed) return;
+    }
     reviewScope = 'all';
     refreshReviewSelection();
 }
 
-function applyQuickFilter(filterName) {
+async function applyQuickFilter(filterName) {
     if (!canChangeReviewSelection()) return;
+    if (dirtyCanvasStem) {
+        const flushed = await flushUnsavedCanvasDraftIfNeeded();
+        if (!flushed) return;
+    }
     currentFilter = filterName;
     document.querySelectorAll('#allScopeFilterChips .f-chip').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.filter === filterName);
@@ -1313,10 +1365,15 @@ function renderStudioFileList(fromScroll = false) {
     }
 }
 
-function selectReviewItem(stem) {
+async function selectReviewItem(stem) {
+    if (stem === activeStem) return true;
     if (isSavingCanvas || lastSaveFailed || reviewUpdatePending) {
         showToast('請等待標記儲存完成；若儲存失敗請先點擊重試。', 'warn');
-        return;
+        return false;
+    }
+    if (dirtyCanvasStem && dirtyCanvasStem !== stem) {
+        const flushed = await flushUnsavedCanvasDraftIfNeeded();
+        if (!flushed) return false;
     }
     dragAction = null;
     isDrawBoxMode = false;
@@ -1327,6 +1384,7 @@ function selectReviewItem(stem) {
     renderStudioFileList();
     renderInspectorAndCanvas();
     saveSessionProgress();
+    return true;
 }
 
 function readDisplayPreference(key, fallback) {
@@ -1438,13 +1496,20 @@ function updateSaveIndicator(state, message, retry) {
     if (!el) return;
     el.className = `save-badge ${state}`;
     el.onclick = null;
-    el.disabled = state !== 'error';
+    el.disabled = (state !== 'error' && state !== 'unsaved');
     if (state === 'saved') {
         el.textContent = message || '[✓] 已儲存';
+        el.title = '標記已安全寫入檔案';
     } else if (state === 'saving') {
         el.textContent = message || '[...] 儲存中';
+        el.title = '正在寫入檔案…';
+    } else if (state === 'unsaved') {
+        el.textContent = message || '[●] 尚未儲存（按 C 確認儲存）';
+        el.title = '畫布微調先暫存於記憶體以維持流暢操作；按「確認並下一張 (C)」即一次正式儲存，或點擊此處立即暫存草稿。';
+        el.onclick = () => flushUnsavedCanvasDraftIfNeeded();
     } else if (state === 'error') {
         el.textContent = message || '[✕] 儲存失敗（點擊重試）';
+        el.title = '點擊重新嘗試寫入檔案';
         el.onclick = retry || (() => retryLastFailedSave());
     }
 }
@@ -1458,7 +1523,13 @@ function renderInspectorAndCanvas() {
     const item = scanData.items.find(i => i.stem === activeStem);
     const list = getActiveReviewItemsList();
     const s = scanData.summary;
-    if (!isSavingCanvas && !lastSaveFailed && !reviewUpdatePending) updateSaveIndicator('saved');
+    if (!isSavingCanvas && !lastSaveFailed && !reviewUpdatePending) {
+        if (dirtyCanvasStem && dirtyCanvasStem === activeStem) {
+            updateSaveIndicator('unsaved', '[●] 尚未儲存（按 C 確認儲存）');
+        } else {
+            updateSaveIndicator('saved');
+        }
+    }
 
     // 更新頂部進度與統計
     const idxInList = list.findIndex(i => i.stem === activeStem);
@@ -1747,6 +1818,7 @@ async function confirmNewBoxClassModal() {
         return;
     }
 
+    const snap = snapshotItemForUndo(item);
     const defined = getDefinedClassesList();
     const matched = defined.find(c => c.name === rawName);
     let targetId;
@@ -1774,8 +1846,12 @@ async function confirmNewBoxClassModal() {
             class_name: targetName,
             xc: pendingNewBox.xc,
             yc: pendingNewBox.yc,
+            x_center: pendingNewBox.xc,
+            y_center: pendingNewBox.yc,
             w: pendingNewBox.w,
-            h: pendingNewBox.h
+            h: pendingNewBox.h,
+            width: pendingNewBox.w,
+            height: pendingNewBox.h
         });
         selectedBoxIndex = item.boxes.length - 1;
     } else {
@@ -1787,7 +1863,7 @@ async function confirmNewBoxClassModal() {
     pendingNewBox = null;
     pendingClassEditBoxIdx = -1;
     closeModal('newBoxClassModal');
-    await saveCanvasBoxesToDisk(item.stem, item.boxes);
+    markCanvasDraftDirty(item, snap);
 }
 
 function toggleDrawBoxMode(forceState) {
@@ -1808,21 +1884,28 @@ async function duplicateSelectedBoxOnCanvas() {
         showToast('請先點選要複製的標記框', 'info');
         return;
     }
+    const snap = snapshotItemForUndo(item);
     const src = item.boxes[selectedBoxIndex];
     const stepX = (src.xc + src.w / 2 + 0.025 <= 1) ? 0.025 : -0.025;
     const stepY = (src.yc + src.h / 2 + 0.025 <= 1) ? 0.025 : -0.025;
+    const nx = Math.max(src.w / 2, Math.min(1 - src.w / 2, src.xc + stepX));
+    const ny = Math.max(src.h / 2, Math.min(1 - src.h / 2, src.yc + stepY));
     const newBox = {
         class_id: src.class_id,
         class_name: src.class_name,
-        xc: Math.max(src.w / 2, Math.min(1 - src.w / 2, src.xc + stepX)),
-        yc: Math.max(src.h / 2, Math.min(1 - src.h / 2, src.yc + stepY)),
+        xc: nx,
+        yc: ny,
+        x_center: nx,
+        y_center: ny,
         w: src.w,
-        h: src.h
+        h: src.h,
+        width: src.w,
+        height: src.h
     };
     item.boxes.push(newBox);
     selectedBoxIndex = item.boxes.length - 1;
     isDrawBoxMode = false;
-    await saveCanvasBoxesToDisk(item.stem, item.boxes);
+    markCanvasDraftDirty(item, snap);
 }
 
 async function changeSelectedBoxClass(boxIdx, newCidVal) {
@@ -1836,12 +1919,13 @@ async function changeSelectedBoxClass(boxIdx, newCidVal) {
     const b = item.boxes[boxIdx];
     const newCid = parseInt(newCidVal, 10);
     if (!b || !Number.isFinite(newCid) || Number(b.class_id) === newCid) return;
+    const snap = snapshotItemForUndo(item);
     const avail = getAvailableCanvasClasses();
     const found = avail.find(c => c.id === newCid);
     b.class_id = newCid;
     b.class_name = found ? found.name : `class_${newCid}`;
     defaultDrawClassId = newCid;
-    await saveCanvasBoxesToDisk(item.stem, item.boxes);
+    markCanvasDraftDirty(item, snap);
 }
 
 function reviewRemainingPhotos() {
@@ -2506,6 +2590,7 @@ function initCanvasInteraction() {
                         corner: c.name,
                         boxIdx: selectedBoxIndex,
                         origBox: { ...b },
+                        preDragSnap: snapshotItemForUndo(item),
                         modified: false
                     };
                     return;
@@ -2519,6 +2604,7 @@ function initCanvasInteraction() {
                     startX: mx,
                     startY: my,
                     origBox: { ...b },
+                    preDragSnap: snapshotItemForUndo(item),
                     wasAlreadySelected: true,
                     modified: false
                 };
@@ -2560,6 +2646,7 @@ function initCanvasInteraction() {
         // 4. 一般適應視窗狀態（未放大）：點中標記框可直接選取並拖曳微調位置
         if (hitBoxIdx >= 0) {
             const b = item.boxes[hitBoxIdx];
+            const preSnap = snapshotItemForUndo(item);
             selectedBoxIndex = hitBoxIdx;
             defaultDrawClassId = Number(b.class_id);
             dragAction = {
@@ -2568,6 +2655,7 @@ function initCanvasInteraction() {
                 startX: mx,
                 startY: my,
                 origBox: { ...b },
+                preDragSnap: preSnap,
                 wasAlreadySelected: false,
                 modified: false
             };
@@ -2756,17 +2844,203 @@ function initCanvasInteraction() {
             return;
         }
 
-        if (dragAction.modified && item) {
-            if (!isDrawBoxMode) canvasHoverPos = null;
-            saveCanvasBoxesToDisk(item.stem, item.boxes);
-        } else if (dragAction.mode === 'move' && dragAction.wasAlreadySelected && isCanvasZoomedOrScrollable(mainWrapper)) {
+        const doneDrag = dragAction;
+        if (!isDrawBoxMode) canvasHoverPos = null;
+        dragAction = null;
+
+        if (doneDrag.modified && item) {
+            markCanvasDraftDirty(item, doneDrag.preDragSnap);
+        } else if (doneDrag.mode === 'move' && doneDrag.wasAlreadySelected && isCanvasZoomedOrScrollable(mainWrapper)) {
             // 在放大狀態下若單擊已選取的標記框且未拖動，可取消選取以便隨時拖移照片
             selectedBoxIndex = -1;
             renderInspectorAndCanvas();
         }
-        if (!isDrawBoxMode) canvasHoverPos = null;
-        dragAction = null;
     });
+}
+
+function snapshotItemForUndo(item) {
+    if (!item) return null;
+    return {
+        stem: item.stem,
+        boxes: JSON.parse(JSON.stringify(item.boxes || [])),
+        classes: Array.isArray(scanData?.classes) ? [...scanData.classes] : [],
+        box_count: item.box_count,
+        review_state: item.review_state,
+        review_status: item.review_status,
+        review_label: item.review_label,
+        is_valid_reference: item.is_valid_reference,
+        has_blocking_error: item.has_blocking_error,
+        format_status: item.format_status,
+        format_label: item.format_label,
+        is_empty_file: item.is_empty_file,
+        issues: JSON.parse(JSON.stringify(item.issues || [])),
+        status: item.status
+    };
+}
+
+function restoreItemFromUndoSnapshot(item, snap) {
+    if (!item || !snap) return;
+    item.boxes = JSON.parse(JSON.stringify(snap.boxes || []));
+    if (Array.isArray(snap.classes)) {
+        scanData.classes = [...snap.classes];
+    }
+    item.box_count = snap.box_count ?? item.boxes.length;
+    item.review_state = snap.review_state;
+    item.review_status = snap.review_status;
+    item.review_label = snap.review_label;
+    item.is_valid_reference = snap.is_valid_reference;
+    item.has_blocking_error = snap.has_blocking_error;
+    item.format_status = snap.format_status;
+    item.format_label = snap.format_label;
+    item.is_empty_file = snap.is_empty_file;
+    item.issues = JSON.parse(JSON.stringify(snap.issues || []));
+    item.status = snap.status;
+}
+
+function syncItemLocalDraftState(item) {
+    if (!item) return;
+    if (!Array.isArray(item.boxes)) item.boxes = [];
+    const classesArr = Array.isArray(scanData?.classes) ? scanData.classes : [];
+    const hasClasses = classesArr.length > 0;
+
+    const imgIssues = (item.issues || []).filter(i => i.code === 'EXIF_ROTATION' || i.code === 'IMAGE_CORRUPT');
+    const localIssues = [...imgIssues];
+    let hasBlocking = imgIssues.some(i => i.blocking);
+
+    for (const b of item.boxes) {
+        const xc = Number(b.xc ?? b.x_center);
+        const yc = Number(b.yc ?? b.y_center);
+        const w = Number(b.w ?? b.width);
+        const h = Number(b.h ?? b.height);
+        b.xc = xc; b.yc = yc; b.w = w; b.h = h;
+        b.x_center = xc; b.y_center = yc; b.width = w; b.height = h;
+        const cid = parseInt(b.class_id, 10);
+        if (hasClasses && cid >= 0 && cid < classesArr.length && classesArr[cid]) {
+            b.class_name = classesArr[cid];
+        } else if (!b.class_name) {
+            b.class_name = `未定義類別(${cid})`;
+        }
+
+        if (![xc, yc, w, h].every(Number.isFinite) || !(xc >= 0 && xc <= 1 && yc >= 0 && yc <= 1 && w > 0 && w <= 1 && h > 0 && h <= 1)) {
+            hasBlocking = true;
+            localIssues.push({
+                level: 'error',
+                code: 'COORD_ABNORMAL',
+                blocking: true,
+                reason: '標記框座標超出正常範圍 [0, 1]',
+                suggestion: '請於畫布重新調整或刪除異常標記框。',
+                message: '標記框座標超出正常範圍 [0, 1]'
+            });
+        }
+        if (hasClasses && (!Number.isInteger(cid) || cid < 0 || cid >= classesArr.length)) {
+            hasBlocking = true;
+            localIssues.push({
+                level: 'error',
+                code: 'CLASS_OUT_OF_RANGE',
+                blocking: true,
+                reason: `類別編號 ${cid} 超出目前類別清單範圍`,
+                suggestion: '請重新選擇有效類別或執行類別修正。',
+                message: `類別編號 ${cid} 超出目前類別清單範圍`
+            });
+        }
+    }
+
+    item.box_count = item.boxes.length;
+    item.is_empty_file = item.boxes.length === 0;
+    item.issues = localIssues;
+    item.has_blocking_error = hasBlocking;
+    item.format_status = hasBlocking ? 'format_error' : (item.boxes.length > 0 ? 'valid' : (item.has_label ? 'empty_file' : 'missing_label'));
+    item.format_label = hasBlocking ? '格式異常' : (item.boxes.length > 0 ? '格式檢查正常' : (item.has_label ? '空白標記檔' : '未建立標記檔'));
+    item.review_state = '';
+    item.review_status = hasBlocking ? 'needs_fix' : ((item.boxes.length > 0 || item.has_label) ? 'pending_review' : 'unlabeled');
+    item.review_label = hasBlocking ? '需修正' : (item.review_status === 'pending_review' ? '待人工確認' : '未標記');
+    item.is_valid_reference = item.boxes.length > 0 && !hasBlocking;
+    item.status = hasBlocking ? 'error' : (localIssues.length > 0 ? 'warning' : 'pass');
+}
+
+function markCanvasDraftDirty(item, preSnap) {
+    if (!item) return;
+    if (dirtyCanvasStem !== item.stem) {
+        dirtyCanvasStem = item.stem;
+        dirtyCanvasOrigState = preSnap || snapshotItemForUndo(item);
+        localCanvasUndoStack = preSnap ? [preSnap] : [];
+    } else if (preSnap) {
+        localCanvasUndoStack.push(preSnap);
+        if (localCanvasUndoStack.length > 50) localCanvasUndoStack.shift();
+    }
+
+    lastSaveFailed = false;
+    pendingSavePayload = null;
+    syncItemLocalDraftState(item);
+    recomputeClientSummaryCounts();
+    updateHeaderAndNavBadges();
+    renderLoadStepSummary();
+    renderStudioFileList();
+    renderInspectorAndCanvas();
+}
+
+async function flushUnsavedCanvasDraftIfNeeded() {
+    if (!dirtyCanvasStem || !scanData || !scanData.ok) return true;
+    if (isSavingCanvas && activeSavePromise) {
+        const pendingOk = await activeSavePromise;
+        if (!pendingOk) return false;
+        if (!dirtyCanvasStem) return true;
+    }
+    const item = scanData.items?.find(i => i.stem === dirtyCanvasStem);
+    if (!item) {
+        dirtyCanvasStem = null;
+        dirtyCanvasOrigState = null;
+        localCanvasUndoStack = [];
+        return true;
+    }
+    return await saveCanvasBoxesToDisk(item.stem, item.boxes, { confirm: false, skipInspectorRender: true });
+}
+
+function applySingleSavePatch(data) {
+    if (!scanData || !data || !data.item_patch) return;
+    const patch = data.item_patch;
+    const item = scanData.items?.find(i => i.stem === patch.stem);
+    if (!item) return;
+
+    const imgIssues = (item.issues || []).filter(i => i.code === 'EXIF_ROTATION' || i.code === 'IMAGE_CORRUPT');
+    const mergedIssues = [...imgIssues, ...(patch.issues || [])];
+    const hasBlocking = Boolean(patch.has_blocking_error) || mergedIssues.some(i => i.blocking);
+
+    Object.assign(item, patch);
+    item.issues = mergedIssues;
+    item.has_blocking_error = hasBlocking;
+    item.is_valid_reference = item.boxes.length > 0 && !hasBlocking;
+    if (hasBlocking && item.review_status !== 'needs_fix') {
+        item.review_status = 'needs_fix';
+        item.review_label = '需修正';
+    }
+
+    if (Array.isArray(data.classes)) {
+        scanData.classes = data.classes;
+    }
+    if ('classes_file_exists' in data) {
+        scanData.classes_file_exists = Boolean(data.classes_file_exists);
+    }
+    if (data.classes_path) {
+        scanData.classes_path = data.classes_path;
+    }
+    if (data.last_backup) {
+        scanData.last_backup = data.last_backup;
+    }
+
+    // 同步維護 step-load 的 issue_groups（移除該 stem 的舊標籤問題）
+    if (Array.isArray(scanData.issue_groups)) {
+        const dynamicCodes = new Set(['MISSING_LABEL', 'EMPTY_LABEL', 'CLASS_OUT_OF_RANGE', 'FORMAT_ERR', 'COORD_ABNORMAL', 'DUPLICATE_BOX']);
+        scanData.issue_groups.forEach(grp => {
+            if (dynamicCodes.has(grp.code) && Array.isArray(grp.stems)) {
+                grp.stems = grp.stems.filter(st => st !== patch.stem);
+                grp.count = grp.stems.length;
+            }
+        });
+        scanData.issue_groups = scanData.issue_groups.filter(grp => grp.count > 0);
+    }
+
+    recomputeClientSummaryCounts();
 }
 
 async function nudgeSelectedBoxOnCanvas(dxPixels, dyPixels) {
@@ -2779,50 +3053,76 @@ async function nudgeSelectedBoxOnCanvas(dxPixels, dyPixels) {
     const nextXc = Math.max(b.w / 2, Math.min(1 - b.w / 2, b.xc + (dxPixels / imgW)));
     const nextYc = Math.max(b.h / 2, Math.min(1 - b.h / 2, b.yc + (dyPixels / imgH)));
     if (Math.abs(nextXc - b.xc) < 1e-7 && Math.abs(nextYc - b.yc) < 1e-7) return true;
+    const snap = snapshotItemForUndo(item);
     b.xc = nextXc;
     b.yc = nextYc;
     b.x_center = nextXc;
     b.y_center = nextYc;
-    redrawCanvases();
-    return await saveCanvasBoxesToDisk(item.stem, item.boxes);
+    markCanvasDraftDirty(item, snap);
+    return true;
 }
 
 async function deleteSelectedBoxOnCanvas() {
     const item = scanData?.items?.find(i => i.stem === activeStem);
     if (isSavingCanvas || lastSaveFailed || reviewUpdatePending || !item || selectedBoxIndex < 0 || selectedBoxIndex >= item.boxes.length) return;
+    const snap = snapshotItemForUndo(item);
     item.boxes.splice(selectedBoxIndex, 1);
     selectedBoxIndex = -1;
-    await saveCanvasBoxesToDisk(item.stem, item.boxes);
+    markCanvasDraftDirty(item, snap);
 }
 
-async function saveCanvasBoxesToDisk(stem, boxes) {
+async function saveCanvasBoxesToDisk(stem, boxes, options = {}) {
     isSavingCanvas = true;
     lastSaveFailed = false;
     const workspace = scanData?.workspace_id;
-    pendingSavePayload = { workspace, stem, boxes: JSON.parse(JSON.stringify(boxes)) };
-    updateSaveIndicator('saving', '[...] 儲存中');
+    const confirmAfterSave = Boolean(options.confirm);
+    const definedClasses = Array.isArray(scanData?.classes) ? [...scanData.classes] : [];
+    pendingSavePayload = {
+        workspace,
+        stem,
+        boxes: JSON.parse(JSON.stringify(boxes)),
+        confirm: confirmAfterSave
+    };
+    updateSaveIndicator('saving', confirmAfterSave ? '[...] 儲存並確認中' : '[...] 儲存中');
 
     activeSavePromise = (async () => {
         try {
             const res = await workspaceFetch('/api/save_single_label', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ stem, boxes })
+                body: JSON.stringify({
+                    stem,
+                    boxes,
+                    confirm: confirmAfterSave,
+                    fast_single: true,
+                    defined_classes: definedClasses
+                })
             });
             const data = await res.json();
             if (workspace !== scanData?.workspace_id) return false;
             if (!data.ok) {
                 throw new Error(data.error || '寫入標記檔失敗');
             }
-            scanData = data.scan;
+            if (data.fast_single && data.item_patch) {
+                applySingleSavePatch(data);
+            } else if (data.scan) {
+                scanData = data.scan;
+            }
+            if (dirtyCanvasStem === stem) {
+                dirtyCanvasStem = null;
+                dirtyCanvasOrigState = null;
+                localCanvasUndoStack = [];
+            }
             isSavingCanvas = false;
             lastSaveFailed = false;
             pendingSavePayload = null;
             updateSaveIndicator('saved');
             updateHeaderAndNavBadges();
             renderLoadStepSummary();
-            renderStudioFileList();
-            renderInspectorAndCanvas();
+            if (!options.skipInspectorRender) {
+                renderStudioFileList();
+                renderInspectorAndCanvas();
+            }
             return true;
         } catch (err) {
             if (workspace !== scanData?.workspace_id) return false;
@@ -2839,7 +3139,11 @@ async function saveCanvasBoxesToDisk(stem, boxes) {
 
 async function retryLastFailedSave() {
     if (!pendingSavePayload || pendingSavePayload.workspace !== scanData?.workspace_id) return false;
-    return await saveCanvasBoxesToDisk(pendingSavePayload.stem, pendingSavePayload.boxes);
+    return await saveCanvasBoxesToDisk(
+        pendingSavePayload.stem,
+        pendingSavePayload.boxes,
+        { confirm: Boolean(pendingSavePayload.confirm) }
+    );
 }
 
 // ============================================================================
@@ -2878,6 +3182,18 @@ async function confirmCurrentAndNextInternal() {
     if (item.has_blocking_error) {
         showToast(`無法標記為已確認：此張照片尚有格式錯誤 (${item.format_label})，請先修正。`, 'error');
         return;
+    }
+
+    // 2. 若此張照片有尚未寫入硬碟的畫布微調，於按下「確認並下一張 (C)」時一次寫入並確認完成！
+    if (dirtyCanvasStem === stem) {
+        const ok = await saveCanvasBoxesToDisk(item.stem, item.boxes, { confirm: true, skipInspectorRender: true });
+        if (!ok || workspace !== scanData?.workspace_id || stem !== activeStem) return;
+        reviewUpdatePending = false;
+        advanceToNextUnconfirmedOrNext();
+        return;
+    } else if (dirtyCanvasStem && dirtyCanvasStem !== stem) {
+        const flushed = await flushUnsavedCanvasDraftIfNeeded();
+        if (!flushed || workspace !== scanData?.workspace_id || stem !== activeStem) return;
     }
 
     const allowEmpty = (item.box_count === 0);
@@ -2990,6 +3306,10 @@ function recomputeClientSummaryCounts() {
     scanData.summary.pending_review_count = pending;
     scanData.summary.needs_fix_count = needsFix;
     scanData.summary.unlabeled_count = unlabeled;
+    scanData.summary.reference_candidate_count = photos.filter(i => i.is_valid_reference).length;
+    scanData.summary.paired_count = photos.filter(i => i.has_label).length;
+    scanData.summary.paired_with_boxes_count = photos.filter(i => i.has_label && i.box_count > 0).length;
+    scanData.summary.empty_label_count = photos.filter(i => i.has_label && i.box_count === 0).length;
     scanData.summary.confirmed_pct = total > 0 ? Math.round((confirmed / total) * 1000) / 10 : 0;
 }
 
@@ -3023,7 +3343,12 @@ function navigateItem(delta) {
     selectReviewItem(list[nextIdx].stem);
 }
 
-function setCurrentAsMaster() {
+async function setCurrentAsMaster() {
+    if (!scanData || !activeStem) return;
+    if (dirtyCanvasStem === activeStem) {
+        const flushed = await flushUnsavedCanvasDraftIfNeeded();
+        if (!flushed) return;
+    }
     const item = scanData?.items?.find(i => i.stem === activeStem);
     if (!item) return;
     if (!item.is_valid_reference) {
@@ -3184,6 +3509,12 @@ function handleModalKey(event) {
 }
 
 function openModal(modalId) {
+    if (modalId === 'remapModal' && dirtyCanvasStem) {
+        flushUnsavedCanvasDraftIfNeeded().then(ok => {
+            if (ok) openModal('remapModal');
+        });
+        return;
+    }
     const modal = document.getElementById(modalId);
     if (!modal) return;
     const tools = document.querySelector('.utility-tools');
@@ -3540,6 +3871,31 @@ let undoInProgress = false;
 
 async function handleUndoLast() {
     if (undoInProgress) return;
+    if (dirtyCanvasStem && localCanvasUndoStack.length > 0 && dirtyCanvasStem === activeStem) {
+        const curItem = scanData?.items?.find(i => i.stem === activeStem);
+        if (curItem) {
+            const snap = localCanvasUndoStack.pop();
+            if (localCanvasUndoStack.length === 0) {
+                restoreItemFromUndoSnapshot(curItem, dirtyCanvasOrigState || snap);
+                dirtyCanvasStem = null;
+                dirtyCanvasOrigState = null;
+            } else {
+                curItem.boxes = JSON.parse(JSON.stringify(snap.boxes || []));
+                if (Array.isArray(snap.classes)) scanData.classes = [...snap.classes];
+                syncItemLocalDraftState(curItem);
+            }
+            if (selectedBoxIndex >= (curItem.boxes?.length || 0)) {
+                selectedBoxIndex = (curItem.boxes?.length || 0) - 1;
+            }
+            recomputeClientSummaryCounts();
+            updateHeaderAndNavBadges();
+            renderLoadStepSummary();
+            renderStudioFileList();
+            renderInspectorAndCanvas();
+            showToast('已還原畫布微調', 'info');
+            return;
+        }
+    }
     undoInProgress = true;
     const tools = document.querySelector('.utility-tools');
     if (tools?.open) {
@@ -3547,6 +3903,10 @@ async function handleUndoLast() {
         tools.querySelector('summary')?.focus();
     }
     try {
+        if (dirtyCanvasStem) {
+            const flushed = await flushUnsavedCanvasDraftIfNeeded();
+            if (!flushed) return;
+        }
         const res = await workspaceFetch('/api/undo', { method: 'POST' });
         const data = await res.json();
         if (!data.ok) {
@@ -3736,10 +4096,10 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '#canvasViewport',
                 pulseTag: '步驟 3 · 調整標記框',
                 title: '3. 拖曳與微調標記框',
-                desc: '點擊標記框可直接拖曳移動，或拉動周圍 8 個白點調整大小；放開滑鼠即自動儲存。',
-                tip: '💡 選取標記框後，按方向鍵 ↑↓←→ 可微調 1 像素（按住 Shift 為 10 像素）。',
+                desc: '點擊標記框可直接拖曳移動，或拉動周圍 8 個白點調整大小；調整完按 C 確認後才正式存檔。',
+                tip: '💡 選取標記框後按方向鍵 ↑↓←→ 可微調 1 像素；直接切換照片也會自動存為草稿。',
                 demoHtml: `
-                    <div class="tour-demo-header"><span>▶ 操作示範：拉動控制點或按方向鍵微調</span><span>放開自動儲存</span></div>
+                    <div class="tour-demo-header"><span>▶ 操作示範：順暢微調，按 C 一次儲存</span><span>0 延遲預覽</span></div>
                     <div class="tour-demo-visual">
                         <div class="demo-Resize-box">
                             <span class="demo-handle tl"></span><span class="demo-handle tc"></span><span class="demo-handle tr"></span>
@@ -4230,4 +4590,12 @@ function handleGuidedTourKey(e) {
     }
     return false;
 }
+
+window.addEventListener('beforeunload', (e) => {
+    if (dirtyCanvasStem || isSavingCanvas) {
+        e.preventDefault();
+        e.returnValue = '';
+    }
+});
+
 
