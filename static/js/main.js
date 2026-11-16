@@ -3743,6 +3743,69 @@ async function deleteSelectedBoxOnCanvas() {
     markCanvasDraftDirty(item, snap);
 }
 
+/**
+ * Paste label boxes from the immediately preceding photo in sorted folder order.
+ * No-ops silently when on the first photo or when the previous photo has no boxes.
+ */
+function pasteBoxesFromPreviousPhoto() {
+    if (!scanData || !Array.isArray(scanData.items) || !activeStem) return false;
+    if (isSavingCanvas || lastSaveFailed || reviewUpdatePending || dragAction) return false;
+
+    const orderedPhotos = scanData.items.filter(i => i.has_image);
+    const curIdx = orderedPhotos.findIndex(i => i.stem === activeStem);
+    if (curIdx <= 0) return false;
+
+    const curItem = orderedPhotos[curIdx];
+    const prevItem = orderedPhotos[curIdx - 1];
+    if (!curItem || !prevItem || !Array.isArray(prevItem.boxes) || prevItem.boxes.length === 0) {
+        return false;
+    }
+
+    const copiedBoxes = prevItem.boxes
+        .map(b => {
+            const xc = Number(b.xc ?? b.x_center);
+            const yc = Number(b.yc ?? b.y_center);
+            const w = Number(b.w ?? b.width);
+            const h = Number(b.h ?? b.height);
+            const cid = parseInt(b.class_id, 10);
+            if (![xc, yc, w, h].every(Number.isFinite) || !Number.isInteger(cid)) return null;
+            return {
+                class_id: cid,
+                class_name: b.class_name,
+                xc,
+                yc,
+                x_center: xc,
+                y_center: yc,
+                w,
+                h,
+                width: w,
+                height: h
+            };
+        })
+        .filter(Boolean);
+
+    if (copiedBoxes.length === 0) return false;
+
+    const existingBoxes = Array.isArray(curItem.boxes) ? curItem.boxes : [];
+    const isIdentical = existingBoxes.length === copiedBoxes.length && existingBoxes.every((b, idx) => {
+        const nb = copiedBoxes[idx];
+        return Number(b.class_id) === Number(nb.class_id) &&
+            Math.abs(Number(b.xc ?? b.x_center) - nb.xc) < 1e-6 &&
+            Math.abs(Number(b.yc ?? b.y_center) - nb.yc) < 1e-6 &&
+            Math.abs(Number(b.w ?? b.width) - nb.w) < 1e-6 &&
+            Math.abs(Number(b.h ?? b.height) - nb.h) < 1e-6;
+    });
+    if (isIdentical) return false;
+
+    const snap = snapshotItemForUndo(curItem);
+    curItem.boxes = copiedBoxes;
+    selectedBoxIndex = -1;
+    isDrawBoxMode = false;
+    markCanvasDraftDirty(curItem, snap);
+    showToast(`已貼上前一張（${prevItem.image_name || prevItem.stem}）的 ${copiedBoxes.length} 個標記框`, 'success');
+    return true;
+}
+
 async function saveCanvasBoxesToDisk(stem, boxes, options = {}) {
     isSavingCanvas = true;
     lastSaveFailed = false;
@@ -4041,10 +4104,12 @@ function initKeyboardShortcuts() {
         if (typeof handleGuidedTourKey === 'function' && handleGuidedTourKey(e)) return;
         if (e.isComposing) return;
 
+        const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
+        const isEditableTarget = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable);
+
         // Ctrl+Z / ⌘+Z：還原上一步（輸入框內保留瀏覽器原生的文字復原；不連續觸發）
         if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
-            const zTag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
-            if (zTag === 'INPUT' || zTag === 'TEXTAREA' || zTag === 'SELECT' || e.target?.isContentEditable) return;
+            if (isEditableTarget) return;
             e.preventDefault();
             if (e.repeat) return;
             const undoBtn = document.getElementById('btnQuickUndo');
@@ -4060,12 +4125,20 @@ function initKeyboardShortcuts() {
             return;
         }
 
+        // Ctrl+V / ⌘+V：貼上前一張排序照片的標記資料（僅於標記檢視且非輸入框內生效）
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'v' || e.key === 'V')) {
+            if (isEditableTarget || currentStep !== 'review') return;
+            e.preventDefault();
+            if (e.repeat) return;
+            pasteBoxesFromPreviousPhoto();
+            return;
+        }
+
         if (e.repeat) return;
         if (e.ctrlKey || e.metaKey || e.altKey) return;
 
         // 2. 在輸入框、下拉選單或彈窗開啟時不觸發畫布快捷鍵
-        const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable ||
+        if (isEditableTarget ||
             ((e.key === ' ' || e.key === 'Enter') && (tag === 'BUTTON' || tag === 'SUMMARY'))) {
             return;
         }
