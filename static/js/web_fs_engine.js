@@ -2989,7 +2989,7 @@
             }
         }
 
-        // 3. 轉換首頁「手動貼上路徑」區塊為「繼續上次資料夾 + 內建練習範例」快捷入口
+        // 3. 轉換首頁「手動貼上路徑」區塊為「繼續上次資料夾」快捷入口（已移除內建練習範例按鈕）
         const pathBox = document.querySelector('.welcome-path-box');
         if (pathBox) {
             const hasFsApi = typeof window.showDirectoryPicker === 'function';
@@ -2999,25 +2999,17 @@
                     ⚠️ 偵測到目前瀏覽器不支援直接讀寫本機資料夾，請使用桌面版 <strong>Microsoft Edge</strong> 或 <strong>Google Chrome</strong> 開啟本網頁。
                    </div>`;
 
+            pathBox.style.display = hasFsApi ? 'none' : 'block';
             pathBox.innerHTML = `
                 <input type="hidden" id="inputImageDir" value="">
                 ${browserNotice}
-                <div id="webQuickRestoreArea" style="display:none;margin-bottom:10px;"></div>
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-                    <span class="welcome-path-label" style="margin:0;">手邊還沒有照片？可先用內建範例體驗完整功能：</span>
-                    <button type="button" class="btn btn-secondary btn-sm" id="btnWebLoadSample">
-                        載入內建練習範例
-                    </button>
-                </div>
+                <div id="webQuickRestoreArea" style="display:none;"></div>
             `;
-            const sampleBtn = document.getElementById('btnWebLoadSample');
-            if (sampleBtn) {
-                sampleBtn.addEventListener('click', loadBuiltInSampleWorkspace);
-            }
 
             loadRecentHandleFromIdb('last_image_dir').then(savedHandle => {
                 const area = document.getElementById('webQuickRestoreArea');
                 if (savedHandle && area) {
+                    pathBox.style.display = 'block';
                     area.style.display = 'block';
                     area.innerHTML = `
                         <button type="button" class="btn btn-secondary" id="btnWebRestoreLast" style="width:100%;justify-content:center;font-weight:700;">

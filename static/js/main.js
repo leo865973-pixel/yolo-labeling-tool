@@ -118,6 +118,9 @@ function switchStep(stepName) {
 
     if (stepName === 'apply') {
         renderBatchApplyStep();
+        if (typeof maybePromptGuidedTour === 'function' && !isTourInternalStepSwitch) {
+            setTimeout(() => maybePromptGuidedTour('batch_apply'), 220);
+        }
     } else if (stepName === 'review') {
         setReviewScope(reviewScope);
         setTimeout(updateReviewLayout, 30);
@@ -403,6 +406,9 @@ async function scanCurrentWorkspace(options = {}) {
         } else {
             reviewScope = 'all';
             switchStep('review');
+            if (!options.refreshBoundWorkspace && typeof maybePromptGuidedTour === 'function') {
+                setTimeout(() => maybePromptGuidedTour('post_load'), 260);
+            }
         }
     } catch (err) {
         console.error(err);
@@ -480,7 +486,6 @@ function renderLoadStepSummary() {
         subtextEl.textContent = '';
         btnsEl.innerHTML = `
             <button class="btn btn-primary btn-lg" onclick="pickAndLoadFolder()">重新選擇照片資料夾</button>
-            <button class="btn btn-secondary btn-lg" onclick="loadSampleDataset()">用範例試一次</button>
         `;
     } else if (s.reference_candidate_count === 0) {
         headlineEl.textContent = `缺少參考照片`;
@@ -3036,6 +3041,7 @@ function initKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
         // 1. 避免長按重複觸發 (防止長按 C 連續確認多張照片)
         if (handleModalKey(e)) return;
+        if (typeof handleGuidedTourKey === 'function' && handleGuidedTourKey(e)) return;
         if (e.isComposing) return;
 
         // Ctrl+Z / ⌘+Z：還原上一步（輸入框內保留瀏覽器原生的文字復原；不連續觸發）
@@ -3597,3 +3603,631 @@ function escapeJsStr(str) {
     if (str === null || str === undefined) return '';
     return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
+
+// ============================================================================
+// 互動式動態操作指引（Interactive Guided Tour）系統
+// - 分別管理「照片載入後 (post_load)」與「批次套用 (batch_apply)」每日首次提示狀態
+// - 優先使用瀏覽器 LocalStorage 記錄當日 YYYY-MM-DD 狀態（重整頁面仍保留，隔日自動恢復）
+// - 結合動態聚光燈遮罩 (Spotlight Cutout)、智慧防遮擋定位與內嵌微動畫操作示範
+// ============================================================================
+const TOUR_STORAGE_PREFIX = 'yolo_guided_tour_daily_';
+let activeTourType = null;
+let activeTourStepIdx = 0;
+let pendingPromptTourType = null;
+let isTourInternalStepSwitch = false;
+let tourSavedCleanupCallbacks = [];
+let tourRepositionRaf = null;
+
+function getTodayLocalDateKey() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+
+function getTourDailyState(tourType) {
+    try {
+        const raw = localStorage.getItem(TOUR_STORAGE_PREFIX + tourType);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return null;
+        return parsed;
+    } catch (_) {
+        return null;
+    }
+}
+
+function setTourDailyState(tourType, action) {
+    const today = getTodayLocalDateKey();
+    try {
+        const prev = getTourDailyState(tourType);
+        const keepHideToday = (prev && prev.date === today && prev.hide_today) || action === 'hide_today';
+        const record = {
+            date: today,
+            prompted: true,
+            hide_today: Boolean(keepHideToday),
+            last_action: action,
+            updated_at: Date.now()
+        };
+        localStorage.setItem(TOUR_STORAGE_PREFIX + tourType, JSON.stringify(record));
+    } catch (_) {}
+}
+
+function shouldAutoPromptTour(tourType) {
+    const today = getTodayLocalDateKey();
+    const state = getTourDailyState(tourType);
+    if (!state || state.date !== today) {
+        return true;
+    }
+    if (state.hide_today || state.prompted) {
+        return false;
+    }
+    return true;
+}
+
+function resetGuidedTourDailyState() {
+    try {
+        localStorage.removeItem(TOUR_STORAGE_PREFIX + 'post_load');
+        localStorage.removeItem(TOUR_STORAGE_PREFIX + 'batch_apply');
+    } catch (_) {}
+    closeModal('guidedTourLauncherModal');
+    showToast('已重設今日操作指引提示狀態，下次載入照片或進入批次套用時將再次詢問。', 'success');
+}
+
+const GUIDED_TOUR_CONFIGS = {
+    post_load: {
+        categoryLabel: '標記檢視指引',
+        promptBadge: '操作指引',
+        promptTitle: '照片已載入，要開始操作指引嗎？',
+        promptDesc: '只要 30 秒，帶您快速掌握 3 個核心操作：',
+        promptPoints: [
+            '切換功能區與篩選待處理照片',
+            '在畫布新增、拖曳調整標記框與使用放大鏡',
+            '按 C 確認標記並自動換下一張'
+        ],
+        steps: [
+            {
+                stepTarget: 'review',
+                selector: '.workspace-nav',
+                pulseTag: '步驟 1 · 切換功能區',
+                title: '1. 切換功能區',
+                desc: '點選上方按鈕，即可切換「標記檢視」、「批次套用」與「類別修正」。',
+                tip: '💡 做錯任何操作，都可點右上角「↩ 還原上一步 (Ctrl+Z)」復原。',
+                demoHtml: `
+                    <div class="tour-demo-header"><span>▶ 操作示範：點擊按鈕切換功能</span><span>即時顯示待處理數</span></div>
+                    <div class="tour-demo-visual">
+                        <div class="demo-pill-row">
+                            <span class="demo-pill highlight-pulse">標記檢視 (待確認)</span>
+                            <span class="demo-pill">批次套用 (未標記)</span>
+                            <span class="demo-pill">類別修正</span>
+                        </div>
+                    </div>
+                `
+            },
+            {
+                stepTarget: 'review',
+                selector: '#reviewLeftSidebar',
+                pulseTag: '步驟 2 · 篩選與選擇照片',
+                title: '2. 篩選與選擇照片',
+                desc: '點選上方標籤可篩選「未標記」或「待確認」的照片，點擊清單即可切換照片。',
+                tip: '💡 也可在搜尋框輸入檔名快速查找。',
+                onEnter() {
+                    const leftBar = document.getElementById('reviewLeftSidebar');
+                    if (leftBar && leftBar.classList.contains('collapsed')) {
+                        leftBar.classList.remove('collapsed');
+                        tourSavedCleanupCallbacks.push(() => leftBar.classList.add('collapsed'));
+                    }
+                },
+                demoHtml: `
+                    <div class="tour-demo-header"><span>▶ 操作示範：點選標籤快速篩選</span><span>點擊清單切換照片</span></div>
+                    <div class="tour-demo-visual">
+                        <div class="demo-pill-row">
+                            <span class="demo-pill">全部</span>
+                            <span class="demo-pill">未標記</span>
+                            <span class="demo-pill highlight-pulse">待確認 ✓</span>
+                            <span class="demo-pill">已確認</span>
+                        </div>
+                    </div>
+                `
+            },
+            {
+                stepTarget: 'review',
+                selector: '#canvasViewport',
+                pulseTag: '步驟 3 · 調整標記框',
+                title: '3. 拖曳與微調標記框',
+                desc: '點擊標記框可直接拖曳移動，或拉動周圍 8 個白點調整大小；放開滑鼠即自動儲存。',
+                tip: '💡 選取標記框後，按方向鍵 ↑↓←→ 可微調 1 像素（按住 Shift 為 10 像素）。',
+                demoHtml: `
+                    <div class="tour-demo-header"><span>▶ 操作示範：拉動控制點或按方向鍵微調</span><span>放開自動儲存</span></div>
+                    <div class="tour-demo-visual">
+                        <div class="demo-Resize-box">
+                            <span class="demo-handle tl"></span><span class="demo-handle tc"></span><span class="demo-handle tr"></span>
+                            <span class="demo-handle ml"></span><span class="demo-handle mr"></span>
+                            <span class="demo-handle bl"></span><span class="demo-handle bc"></span><span class="demo-handle br"></span>
+                        </div>
+                    </div>
+                `
+            },
+            {
+                stepTarget: 'review',
+                selector: '.review-mode-bar',
+                pulseTag: '步驟 4 · 比對與放大鏡',
+                title: '4. 並排比較與放大鏡',
+                desc: '點選「並排比較 (V)」可與參考照片左右對照；開啟「🔍 放大鏡 (M)」可在拉框時放大檢視邊緣。',
+                tip: '💡 按住 Ctrl + 滑鼠滾輪可自由放大或縮小畫面。',
+                demoHtml: `
+                    <div class="tour-demo-header"><span>▶ 操作示範：游標處 4 倍放大鏡</span><span>快捷鍵 M / V</span></div>
+                    <div class="tour-demo-visual">
+                        <div class="demo-loupe-circle"></div>
+                    </div>
+                `
+            },
+            {
+                stepTarget: 'review',
+                selector: '#pinnedBoxesSidebar',
+                pulseTag: '步驟 5 · 新增與管理標記框',
+                title: '5. 新增、複製與刪除標記框',
+                desc: '點選「＋ 新增框 (W)」即可在畫布拖曳畫出新框；選取標記框後可複製 (B)、刪除 (Del) 或更改類別。',
+                tip: '💡 新增框放開滑鼠後，可直接點選既有類別或輸入新類別名稱。',
+                demoHtml: `
+                    <div class="tour-demo-header"><span>▶ 操作示範：新增、複製與刪除工具</span><span>快捷鍵 W / B / Del</span></div>
+                    <div class="tour-demo-visual">
+                        <div class="demo-pill-row">
+                            <span class="demo-pill highlight-pulse">＋ 新增框 (W)</span>
+                            <span class="demo-pill">複製框 (B)</span>
+                            <span class="demo-pill">刪除 (Del)</span>
+                        </div>
+                    </div>
+                `
+            },
+            {
+                stepTarget: 'review',
+                selector: '.review-bottom-bar',
+                pulseTag: '步驟 6 · 確認並換張',
+                title: '6. 確認標記並換下一張',
+                desc: '檢查無誤後，點擊「確認並下一張 (C)」即可完成此張並自動跳到下一張。',
+                tip: '💡 點選右側「設為參考 (Space)」，可將此張照片設為批次套用的範本。',
+                demoHtml: `
+                    <div class="tour-demo-header"><span>▶ 操作示範：確認完成並跳下一張</span><span>快捷鍵 A / D / C</span></div>
+                    <div class="tour-demo-visual">
+                        <div class="demo-pill-row">
+                            <span class="demo-pill">上一張 (A)</span>
+                            <span class="demo-pill highlight-pulse">[✓] 確認並下一張 (C)</span>
+                            <span class="demo-pill">下一張 (D)</span>
+                        </div>
+                    </div>
+                `
+            }
+        ]
+    },
+    batch_apply: {
+        categoryLabel: '批次套用指引',
+        promptBadge: '批次套用指引',
+        promptTitle: '要查看「批次套用」操作指引嗎？',
+        promptDesc: '只要 4 個步驟，快速將標記套用到多張相似照片：',
+        promptPoints: [
+            '選擇 1 張已標記的「參考照片」作為範本',
+            '勾選要套用的目標照片並檢查對齊設定',
+            '確認預覽結果並建立標記草稿'
+        ],
+        steps: [
+            {
+                stepTarget: 'apply',
+                selector: '#referenceSelectorArea',
+                pulseTag: '步驟 1 · 選擇參考照片',
+                title: '1. 選擇「參考照片」',
+                desc: '從下拉選單選擇一張已標記好的照片作為範本，系統會將它的標記框套用到其他照片。',
+                tip: '💡 若還沒有參考照片，請先回「標記檢視」畫好 1 張並點選「設為參考」。',
+                demoHtml: `
+                    <div class="tour-demo-header"><span>▶ 操作示範：選擇已標記的照片作為範本</span><span>複製來源</span></div>
+                    <div class="tour-demo-visual">
+                        <div class="demo-pill-row">
+                            <span class="demo-pill highlight-pulse">★ 參考照片</span>
+                            <span class="demo-pill">➔ 提供標記框範本</span>
+                        </div>
+                    </div>
+                `
+            },
+            {
+                stepTarget: 'apply',
+                selector: '.apply-left-col',
+                pulseTag: '步驟 2 · 選擇套用目標',
+                title: '2. 選擇要套用的目標照片',
+                desc: '點選「找出相似照片」自動勾選畫面相近的照片，或點選「全選未標記照片」，也可直接點選下方照片卡片。',
+                tip: '💡 展開「相似照片設定」可調整篩選的相似度門檻。',
+                demoHtml: `
+                    <div class="tour-demo-header"><span>▶ 操作示範：快速勾選目標照片</span><span>批量選取</span></div>
+                    <div class="tour-demo-visual">
+                        <div class="demo-pill-row">
+                            <span class="demo-pill highlight-pulse">找出相似照片</span>
+                            <span class="demo-pill">全選未標記照片</span>
+                            <span class="demo-pill">已選 N 張</span>
+                        </div>
+                    </div>
+                `
+            },
+            {
+                stepTarget: 'apply',
+                selector: '.advanced-apply-details',
+                pulseTag: '步驟 3 · 檢查套用設定',
+                title: '3. 檢查對齊與覆蓋設定',
+                desc: '「智慧局部對齊」會配合照片中物體的微幅移動，自動微調標記框位置；預設不會覆蓋已有標記的照片。',
+                tip: '⚠️ 注意：若勾選「覆蓋既有標記」，原標記會被取代（系統會自動備份）。',
+                onEnter() {
+                    const details = document.querySelector('.advanced-apply-details');
+                    if (details && !details.open) {
+                        details.open = true;
+                        tourSavedCleanupCallbacks.push(() => { details.open = false; });
+                    }
+                },
+                demoHtml: `
+                    <div class="tour-demo-header"><span>▶ 操作示範：自動跟隨物體微調框位</span><span>智慧局部對齊</span></div>
+                    <div class="tour-demo-visual">
+                        <div class="demo-zncc-wrap">
+                            <div class="demo-zncc-obj">目標物體</div>
+                            <div class="demo-zncc-box"></div>
+                        </div>
+                    </div>
+                `
+            },
+            {
+                stepTarget: 'apply',
+                selector: '.apply-right-col',
+                pulseTag: '步驟 4 · 預覽並建立草稿',
+                title: '4. 確認預覽並建立草稿',
+                desc: '先查看「寫入預覽」確認新增與略過的張數，再點擊底部「建立草稿」執行套用。',
+                tip: '⚠️ 注意：批次套用後仍需到「標記檢視」逐張確認，才算正式完成。',
+                demoHtml: `
+                    <div class="tour-demo-header"><span>▶ 操作示範：確認預覽後點擊建立草稿</span><span>完成後逐張確認</span></div>
+                    <div class="tour-demo-visual">
+                        <div class="demo-pill-row">
+                            <span class="demo-pill">預覽：新增 / 略過</span>
+                            <span class="demo-pill highlight-pulse">建立草稿 ➔ 逐張確認</span>
+                        </div>
+                    </div>
+                `
+            }
+        ]
+    }
+};
+
+function isGuidedTourActive() {
+    const overlay = document.getElementById('guidedTourOverlay');
+    const promptModal = document.getElementById('guidedTourPromptModal');
+    return Boolean(
+        (overlay && overlay.style.display !== 'none') ||
+        (promptModal && promptModal.style.display !== 'none')
+    );
+}
+
+function maybePromptGuidedTour(tourType) {
+    if (!GUIDED_TOUR_CONFIGS[tourType]) return;
+    if (!scanData || !scanData.ok || (scanData.summary && scanData.summary.photo_count === 0)) return;
+    if (isGuidedTourActive() || activeModal) return;
+    if (!shouldAutoPromptTour(tourType)) return;
+
+    openGuidedTourPrompt(tourType);
+}
+
+function openGuidedTourPrompt(tourType) {
+    const cfg = GUIDED_TOUR_CONFIGS[tourType];
+    if (!cfg) return;
+    pendingPromptTourType = tourType;
+
+    document.getElementById('tourPromptBadge').textContent = cfg.promptBadge;
+    document.getElementById('tourPromptTitle').textContent = cfg.promptTitle;
+    document.getElementById('tourPromptDesc').textContent = cfg.promptDesc;
+    document.getElementById('tourPromptPoints').innerHTML = cfg.promptPoints
+        .map(pt => `<li>${escapeHtml(pt)}</li>`)
+        .join('');
+
+    const modal = document.getElementById('guidedTourPromptModal');
+    modal.style.display = 'flex';
+    document.getElementById('btnTourPromptStart')?.focus();
+}
+
+function handleTourPromptChoice(choice) {
+    const tourType = pendingPromptTourType;
+    const modal = document.getElementById('guidedTourPromptModal');
+    if (modal) modal.style.display = 'none';
+    pendingPromptTourType = null;
+
+    if (!tourType) return;
+
+    if (choice === 'start') {
+        setTourDailyState(tourType, 'start');
+        startGuidedTour(tourType);
+    } else if (choice === 'hide_today') {
+        setTourDailyState(tourType, 'hide_today');
+        showToast('已設定今日不再自動顯示此指引（隨時可點選右上角「🎓 操作指引」重新開啟）。', 'info');
+    } else {
+        // 暫時略過：記錄今日首次已詢問，避免同日重整頁面重複彈出干擾
+        setTourDailyState(tourType, 'skip');
+    }
+}
+
+function openGuidedTourLauncher() {
+    openModal('guidedTourLauncherModal');
+}
+
+function startGuidedTourFromLauncher(tourType) {
+    closeModal('guidedTourLauncherModal');
+    if (!scanData || !scanData.ok || !scanData.summary || scanData.summary.photo_count === 0) {
+        showToast('請先選擇並載入照片資料夾，即可針對實際作業畫面進行動態操作指引！', 'info');
+        return;
+    }
+    startGuidedTour(tourType);
+}
+
+function runTourStepCleanups() {
+    while (tourSavedCleanupCallbacks.length > 0) {
+        const fn = tourSavedCleanupCallbacks.pop();
+        try { fn(); } catch (_) {}
+    }
+}
+
+function startGuidedTour(tourType) {
+    const cfg = GUIDED_TOUR_CONFIGS[tourType];
+    if (!cfg || !cfg.steps || !cfg.steps.length) return;
+
+    runTourStepCleanups();
+    activeTourType = tourType;
+    activeTourStepIdx = 0;
+
+    const overlay = document.getElementById('guidedTourOverlay');
+    overlay.style.display = 'block';
+
+    renderCurrentGuidedTourStep();
+}
+
+function stepGuidedTour(delta) {
+    if (!activeTourType) return;
+    const cfg = GUIDED_TOUR_CONFIGS[activeTourType];
+    if (!cfg) return;
+
+    const nextIdx = activeTourStepIdx + delta;
+    if (nextIdx < 0) return;
+    if (nextIdx >= cfg.steps.length) {
+        endGuidedTour('completed');
+        return;
+    }
+
+    runTourStepCleanups();
+    activeTourStepIdx = nextIdx;
+    renderCurrentGuidedTourStep();
+}
+
+function markCurrentTourHideToday() {
+    if (!activeTourType) return;
+    setTourDailyState(activeTourType, 'hide_today');
+    endGuidedTour('hide_today');
+    showToast('已設定今日不再自動顯示此指引（需要時可點選頁首「🎓 操作指引」查看）。', 'info');
+}
+
+function endGuidedTour(reason = 'closed') {
+    runTourStepCleanups();
+    const overlay = document.getElementById('guidedTourOverlay');
+    if (overlay) overlay.style.display = 'none';
+    const finishedType = activeTourType;
+    activeTourType = null;
+    activeTourStepIdx = 0;
+    if (reason === 'completed' && finishedType) {
+        showToast('操作指引已完成！需要時可隨時點選頁首「🎓 操作指引」重新查看。', 'success');
+    }
+}
+
+function renderCurrentGuidedTourStep() {
+    if (!activeTourType) return;
+    const cfg = GUIDED_TOUR_CONFIGS[activeTourType];
+    const step = cfg.steps[activeTourStepIdx];
+    if (!step) return;
+
+    // 確保切換至該步驟對應的頁面（不觸發自動詢問）
+    if (step.stepTarget && currentStep !== step.stepTarget && scanData?.ok) {
+        isTourInternalStepSwitch = true;
+        try {
+            switchStep(step.stepTarget);
+        } finally {
+            isTourInternalStepSwitch = false;
+        }
+    }
+
+    if (typeof step.onEnter === 'function') {
+        try { step.onEnter(); } catch (_) {}
+    }
+
+    const total = cfg.steps.length;
+    document.getElementById('guidedTourStepBadge').textContent = `步驟 ${activeTourStepIdx + 1} / ${total}`;
+    document.getElementById('guidedTourCategoryLabel').textContent = cfg.categoryLabel;
+    document.getElementById('guidedTourPulseTag').textContent = step.pulseTag || `步驟 ${activeTourStepIdx + 1}`;
+    document.getElementById('guidedTourStepTitle').textContent = step.title;
+
+    // 支援換行段落呈現
+    const descEl = document.getElementById('guidedTourStepDesc');
+    descEl.innerHTML = escapeHtml(step.desc).replace(/\n/g, '<br>');
+
+    const demoStage = document.getElementById('guidedTourDemoStage');
+    if (step.demoHtml) {
+        demoStage.style.display = 'block';
+        demoStage.innerHTML = step.demoHtml;
+    } else {
+        demoStage.style.display = 'none';
+        demoStage.innerHTML = '';
+    }
+
+    const tipEl = document.getElementById('guidedTourStepTip');
+    if (step.tip) {
+        tipEl.style.display = 'block';
+        tipEl.textContent = step.tip;
+    } else {
+        tipEl.style.display = 'none';
+    }
+
+    // 渲染進度圓點
+    const dotsEl = document.getElementById('guidedTourDots');
+    dotsEl.innerHTML = cfg.steps.map((_, idx) => {
+        const cls = idx === activeTourStepIdx ? 'guided-tour-dot active' : (idx < activeTourStepIdx ? 'guided-tour-dot done' : 'guided-tour-dot');
+        return `<span class="${cls}"></span>`;
+    }).join('');
+
+    // 按鈕狀態切換
+    const btnPrev = document.getElementById('btnTourPrev');
+    const btnNext = document.getElementById('btnTourNext');
+    const btnFinish = document.getElementById('btnTourFinish');
+    const btnSkip = document.getElementById('btnTourSkip');
+
+    btnPrev.disabled = (activeTourStepIdx === 0);
+    const isLast = (activeTourStepIdx === total - 1);
+    btnNext.style.display = isLast ? 'none' : 'inline-flex';
+    btnFinish.style.display = isLast ? 'inline-flex' : 'none';
+    btnSkip.style.display = isLast ? 'none' : 'inline-flex';
+
+    // 先捲動目標元件至可視範圍並定位聚光燈與浮動卡片
+    const targetEl = document.querySelector(step.selector);
+    if (targetEl && typeof targetEl.scrollIntoView === 'function') {
+        try {
+            targetEl.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+        } catch (_) {}
+    }
+
+    positionGuidedTourElements();
+    setTimeout(positionGuidedTourElements, 160);
+    setTimeout(() => {
+        if (isLast) btnFinish.focus();
+        else btnNext.focus();
+    }, 50);
+}
+
+function positionGuidedTourElements() {
+    if (!activeTourType) return;
+    const cfg = GUIDED_TOUR_CONFIGS[activeTourType];
+    const step = cfg?.steps?.[activeTourStepIdx];
+    if (!step) return;
+
+    const spotlight = document.getElementById('guidedTourSpotlight');
+    const popover = document.getElementById('guidedTourPopover');
+    if (!spotlight || !popover) return;
+
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const targetEl = document.querySelector(step.selector);
+    const pad = 6;
+
+    let spotRect = {
+        top: Math.round(vh * 0.15),
+        left: Math.round(vw * 0.15),
+        width: Math.round(vw * 0.7),
+        height: Math.round(vh * 0.25)
+    };
+
+    if (targetEl) {
+        const r = targetEl.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+            const top = Math.max(4, Math.round(r.top - pad));
+            const left = Math.max(4, Math.round(r.left - pad));
+            const right = Math.min(vw - 4, Math.round(r.right + pad));
+            const bottom = Math.min(vh - 4, Math.round(r.bottom + pad));
+            spotRect = {
+                top,
+                left,
+                width: Math.max(40, right - left),
+                height: Math.max(28, bottom - top)
+            };
+        }
+    }
+
+    spotlight.style.top = `${spotRect.top}px`;
+    spotlight.style.left = `${spotRect.left}px`;
+    spotlight.style.width = `${spotRect.width}px`;
+    spotlight.style.height = `${spotRect.height}px`;
+    spotlight.classList.toggle('tag-inside', spotRect.top < 32);
+
+    // 計算浮動說明卡片最佳位置（避免遮擋目標元件，並確保在小螢幕 100% 完整落於可視範圍內）
+    const popRect = popover.getBoundingClientRect();
+    const popW = popRect.width || 410;
+    const popH = popRect.height || 310;
+    const margin = 14;
+    const safeEdge = 12;
+
+    const spaceBottom = vh - (spotRect.top + spotRect.height) - margin;
+    const spaceTop = spotRect.top - margin;
+    const spaceRight = vw - (spotRect.left + spotRect.width) - margin;
+    const spaceLeft = spotRect.left - margin;
+
+    let popTop = safeEdge;
+    let popLeft = safeEdge;
+
+    if (spaceBottom >= popH + safeEdge) {
+        popTop = spotRect.top + spotRect.height + margin;
+        popLeft = spotRect.left + (spotRect.width - popW) / 2;
+    } else if (spaceTop >= popH + safeEdge) {
+        popTop = spotRect.top - popH - margin;
+        popLeft = spotRect.left + (spotRect.width - popW) / 2;
+    } else if (spaceRight >= popW + safeEdge) {
+        popLeft = spotRect.left + spotRect.width + margin;
+        popTop = spotRect.top + (spotRect.height - popH) / 2;
+    } else if (spaceLeft >= popW + safeEdge) {
+        popLeft = spotRect.left - popW - margin;
+        popTop = spotRect.top + (spotRect.height - popH) / 2;
+    } else {
+        // 當目標區域較大（例如主畫布或整欄）時，將說明卡片置於視窗右下或左下最不遮擋核心視覺的位置
+        const candidates = [
+            { top: vh - popH - safeEdge, left: vw - popW - safeEdge },
+            { top: vh - popH - safeEdge, left: safeEdge },
+            { top: safeEdge + 54, left: vw - popW - safeEdge }
+        ];
+        const chosen = candidates[0];
+        popTop = chosen.top;
+        popLeft = chosen.left;
+    }
+
+    popLeft = Math.max(safeEdge, Math.min(vw - popW - safeEdge, Math.round(popLeft)));
+    popTop = Math.max(safeEdge, Math.min(vh - popH - safeEdge, Math.round(popTop)));
+
+    popover.style.left = `${popLeft}px`;
+    popover.style.top = `${popTop}px`;
+}
+
+function scheduleTourReposition() {
+    if (!activeTourType) return;
+    if (tourRepositionRaf) cancelAnimationFrame(tourRepositionRaf);
+    tourRepositionRaf = requestAnimationFrame(() => {
+        tourRepositionRaf = null;
+        positionGuidedTourElements();
+    });
+}
+
+window.addEventListener('resize', scheduleTourReposition);
+window.addEventListener('scroll', scheduleTourReposition, true);
+
+function handleGuidedTourKey(e) {
+    const promptModal = document.getElementById('guidedTourPromptModal');
+    if (promptModal && promptModal.style.display !== 'none') {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            handleTourPromptChoice('skip');
+        } else if (e.key === 'Enter' && document.activeElement?.tagName !== 'BUTTON') {
+            e.preventDefault();
+            handleTourPromptChoice('start');
+        }
+        return true;
+    }
+
+    const overlay = document.getElementById('guidedTourOverlay');
+    if (overlay && overlay.style.display !== 'none') {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            endGuidedTour('closed');
+        } else if (e.key === 'ArrowRight') {
+            e.preventDefault();
+            stepGuidedTour(1);
+        } else if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            stepGuidedTour(-1);
+        }
+        return true;
+    }
+    return false;
+}
+

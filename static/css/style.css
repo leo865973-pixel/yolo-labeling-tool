@@ -2413,3 +2413,449 @@ button:disabled { cursor: not-allowed; }
     min-height: 180px;
     overflow-y: auto;
 }
+
+/* ============================================================================
+   互動式動態操作指引（Interactive Guided Tour）樣式與動畫
+   ============================================================================ */
+.util-tour-btn {
+    border-color: rgba(56, 189, 248, 0.45);
+    color: #E0F2FE;
+}
+.util-tour-btn:hover:not(:disabled) {
+    background: rgba(56, 189, 248, 0.18);
+    border-color: #38BDF8;
+    color: #FFFFFF;
+}
+
+/* 1. 主動詢問彈窗 */
+.tour-prompt-backdrop {
+    z-index: 2100;
+}
+.tour-prompt-dialog {
+    max-width: 520px;
+    border-top: 4px solid var(--primary-blue);
+    padding: 0;
+    overflow: hidden;
+    animation: tourModalPopIn 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes tourModalPopIn {
+    from { opacity: 0; transform: translateY(10px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.tour-prompt-header {
+    padding: 20px 24px 12px;
+    background: linear-gradient(180deg, #EBF5FB 0%, #FFFFFF 100%);
+    border-bottom: 1px solid var(--border-color);
+}
+.tour-prompt-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: #D6EAF8;
+    color: var(--primary-blue);
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+.tour-prompt-header h3 {
+    margin: 0 0 6px;
+    font-size: 20px;
+    color: var(--text-main);
+}
+.tour-prompt-subtitle {
+    margin: 0;
+    font-size: 15px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+.tour-prompt-body {
+    padding: 14px 24px;
+}
+.tour-prompt-points {
+    margin: 0;
+    padding-left: 20px;
+    color: var(--text-main);
+    font-size: 15px;
+    line-height: 1.65;
+}
+.tour-prompt-points li + li {
+    margin-top: 6px;
+}
+.tour-prompt-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 14px 24px 18px;
+    background: #F8FAFC;
+    border-top: 1px solid var(--border-color);
+}
+.tour-prompt-main-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+.tour-hide-today-btn {
+    color: var(--text-muted);
+    font-size: 14px;
+}
+
+/* 2. 操作指引啟動選單 */
+.tour-launcher-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.tour-launcher-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 18px;
+    background: #F8FAFC;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.tour-launcher-card:hover {
+    border-color: var(--primary-blue);
+    box-shadow: 0 2px 8px rgba(40, 116, 166, 0.08);
+}
+.tour-launcher-card-info h4 {
+    margin: 6px 0 4px;
+    font-size: 17px;
+    color: var(--text-main);
+}
+.tour-launcher-card-info p {
+    margin: 0;
+    font-size: 14.5px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+/* 3. 動態高亮聚光燈遮罩 (Spotlight) 與浮動步驟卡片 (Popover) */
+.guided-tour-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 2200;
+    pointer-events: auto;
+    overflow: hidden;
+}
+.guided-tour-spotlight {
+    position: fixed;
+    top: 20%;
+    left: 20%;
+    width: 240px;
+    height: 120px;
+    border-radius: 10px;
+    box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.68), 0 0 0 3px #38BDF8, 0 0 24px rgba(56, 189, 248, 0.55);
+    pointer-events: none;
+    transition:
+        top 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+        left 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+        width 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+        height 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    animation: tourPulseRing 2s infinite ease-in-out;
+}
+@keyframes tourPulseRing {
+    0%, 100% {
+        box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.68), 0 0 0 3px #38BDF8, 0 0 18px rgba(56, 189, 248, 0.45);
+    }
+    50% {
+        box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.68), 0 0 0 5px #7DD3FC, 0 0 28px rgba(56, 189, 248, 0.8);
+    }
+}
+.guided-tour-pulse-tag {
+    position: absolute;
+    top: -26px;
+    left: 0;
+    background: #0284C7;
+    color: #FFFFFF;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+.guided-tour-spotlight.tag-inside .guided-tour-pulse-tag {
+    top: 6px;
+    left: 6px;
+}
+
+.guided-tour-popover {
+    position: fixed;
+    width: min(430px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
+    background: #FFFFFF;
+    border: 1px solid #CBD5E1;
+    border-top: 4px solid #0284C7;
+    border-radius: 12px;
+    box-shadow: 0 18px 40px rgba(15, 23, 42, 0.35);
+    padding: 16px 18px;
+    z-index: 2205;
+    transition:
+        top 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+        left 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.guided-tour-popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.guided-tour-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.guided-tour-step-badge {
+    background: #0284C7;
+    color: #FFFFFF;
+    font-size: 12.5px;
+    font-weight: 700;
+    padding: 2px 9px;
+    border-radius: 999px;
+}
+.guided-tour-cat-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+.guided-tour-close {
+    width: 28px;
+    height: 28px;
+    font-size: 15px;
+}
+.guided-tour-dots {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+.guided-tour-dot {
+    height: 6px;
+    flex: 1;
+    border-radius: 999px;
+    background: #E2E8F0;
+    transition: background-color 0.2s ease;
+}
+.guided-tour-dot.active {
+    background: #0284C7;
+}
+.guided-tour-dot.done {
+    background: #7DD3FC;
+}
+.guided-tour-title {
+    margin: 0 0 6px;
+    font-size: 18px;
+    font-weight: 700;
+    color: #0F172A;
+    line-height: 1.35;
+}
+.guided-tour-desc {
+    margin: 0 0 10px;
+    font-size: 14.5px;
+    color: #334155;
+    line-height: 1.55;
+}
+
+/* 4. 動態操作示範區 (Interactive Micro-Demo Stage) */
+.guided-tour-demo-stage {
+    background: #0F172A;
+    color: #F8FAFC;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    border: 1px solid #1E293B;
+    font-size: 13px;
+}
+.tour-demo-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #38BDF8;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+.tour-demo-visual {
+    position: relative;
+    height: 68px;
+    background: #1E293B;
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 10px;
+}
+
+/* 微動畫元件 */
+.demo-Resize-box {
+    position: relative;
+    width: 110px;
+    height: 44px;
+    border: 2px solid #38BDF8;
+    background: rgba(56, 189, 248, 0.18);
+    border-radius: 2px;
+    animation: tourBoxResizeDemo 2.6s infinite ease-in-out;
+}
+@keyframes tourBoxResizeDemo {
+    0%, 100% { width: 96px; height: 38px; transform: translate(0, 0); }
+    45% { width: 132px; height: 48px; transform: translate(4px, -2px); }
+    75% { width: 132px; height: 48px; transform: translate(10px, -2px); }
+}
+.demo-handle {
+    position: absolute;
+    width: 6px;
+    height: 6px;
+    background: #FFFFFF;
+    border: 1px solid #0284C7;
+}
+.demo-handle.tl { top: -4px; left: -4px; }
+.demo-handle.tr { top: -4px; right: -4px; }
+.demo-handle.bl { bottom: -4px; left: -4px; }
+.demo-handle.br { bottom: -4px; right: -4px; }
+.demo-handle.tc { top: -4px; left: calc(50% - 3px); }
+.demo-handle.bc { bottom: -4px; left: calc(50% - 3px); }
+.demo-handle.ml { top: calc(50% - 3px); left: -4px; }
+.demo-handle.mr { top: calc(50% - 3px); right: -4px; }
+
+.demo-loupe-circle {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    border: 2px solid #38BDF8;
+    background: radial-gradient(circle, rgba(56,189,248,0.25) 0%, rgba(15,23,42,0.9) 100%);
+    position: relative;
+    animation: tourLoupeMoveDemo 2.8s infinite ease-in-out;
+}
+.demo-loupe-circle::before,
+.demo-loupe-circle::after {
+    content: '';
+    position: absolute;
+    background: rgba(248, 113, 113, 0.85);
+}
+.demo-loupe-circle::before {
+    top: 50%; left: 6px; right: 6px; height: 1px;
+}
+.demo-loupe-circle::after {
+    left: 50%; top: 6px; bottom: 6px; width: 1px;
+}
+@keyframes tourLoupeMoveDemo {
+    0%, 100% { transform: translateX(-28px); }
+    50% { transform: translateX(28px); }
+}
+
+.demo-zncc-wrap {
+    position: relative;
+    width: 180px;
+    height: 48px;
+}
+.demo-zncc-obj {
+    position: absolute;
+    top: 8px;
+    left: 72px;
+    width: 68px;
+    height: 32px;
+    background: #334155;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    color: #94A3B8;
+}
+.demo-zncc-box {
+    position: absolute;
+    top: 6px;
+    left: 42px;
+    width: 72px;
+    height: 36px;
+    border: 2px dashed #F59E0B;
+    border-radius: 4px;
+    animation: tourZnccAlignDemo 2.6s infinite ease-in-out;
+}
+@keyframes tourZnccAlignDemo {
+    0%, 20% { left: 42px; border-color: #F59E0B; border-style: dashed; }
+    65%, 100% { left: 70px; border-color: #22C55E; border-style: solid; }
+}
+
+.demo-pill-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.demo-pill {
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: #334155;
+    color: #CBD5E1;
+    font-size: 12px;
+    font-weight: 600;
+}
+.demo-pill.highlight-pulse {
+    background: #0284C7;
+    color: #FFFFFF;
+    animation: tourChipCycleDemo 1.8s infinite ease-in-out;
+}
+@keyframes tourChipCycleDemo {
+    0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.5); }
+    50% { transform: scale(1.06); box-shadow: 0 0 0 6px rgba(56, 189, 248, 0); }
+}
+
+.guided-tour-tip {
+    background: #F0F9FF;
+    border-left: 3px solid #0284C7;
+    padding: 7px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    color: #0369A1;
+    margin-bottom: 12px;
+    line-height: 1.45;
+}
+.guided-tour-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-top: 10px;
+    border-top: 1px solid #E2E8F0;
+    flex-wrap: wrap;
+}
+.guided-tour-footer-left,
+.guided-tour-footer-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.tour-inline-hide-btn {
+    font-size: 12.5px;
+    color: var(--text-muted);
+}
+
+@media (max-height: 760px) {
+    .guided-tour-popover {
+        padding: 12px 14px;
+    }
+    .tour-demo-visual {
+        height: 54px;
+    }
+    .guided-tour-desc {
+        font-size: 13.5px;
+        margin-bottom: 8px;
+    }
+}
+@media (max-width: 768px) {
+    .tour-launcher-card {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+}

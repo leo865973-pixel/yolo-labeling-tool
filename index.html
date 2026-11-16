@@ -31,6 +31,9 @@
             <button class="util-btn" onclick="openModal('shortcutModal')" title="查看鍵盤快捷鍵 (?)">
                 快捷鍵說明
             </button>
+            <button class="util-btn util-tour-btn" id="btnLaunchTour" onclick="openGuidedTourLauncher()" title="隨時重新啟動互動式動態操作指引">
+                🎓 操作指引
+            </button>
         </div>
     </header>
     <nav class="workspace-nav" aria-label="專案工作區">
@@ -603,6 +606,108 @@
             <div class="modal-footer">
                 <button class="btn btn-secondary" onclick="openInExplorer('detailFullImageDir')">在檔案總管開啟</button>
                 <button class="btn btn-primary" onclick="closeModal('folderDetailModal'); switchStep('load'); toggleLoadSettingsPanel(true);">更換資料夾</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==================================================================
+         互動式動態操作指引（Interactive Guided Tour）詢問彈窗、啟動選單與聚焦遮罩
+         ================================================================== -->
+    <div id="guidedTourPromptModal" class="modal-backdrop tour-prompt-backdrop" role="dialog" aria-modal="true" aria-labelledby="tourPromptTitle" style="display: none;">
+        <div class="modal-dialog tour-prompt-dialog">
+            <div class="tour-prompt-header">
+                <span class="tour-prompt-badge" id="tourPromptBadge">互動式動態操作指引</span>
+                <h3 id="tourPromptTitle">是否啟動操作指引？</h3>
+                <p class="tour-prompt-subtitle" id="tourPromptDesc"></p>
+            </div>
+            <div class="tour-prompt-body">
+                <ul class="tour-prompt-points" id="tourPromptPoints"></ul>
+            </div>
+            <div class="tour-prompt-footer">
+                <button type="button" class="btn btn-ghost btn-sm tour-hide-today-btn" id="btnTourPromptHideToday" onclick="handleTourPromptChoice('hide_today')">
+                    今日不再顯示
+                </button>
+                <div class="tour-prompt-main-actions">
+                    <button type="button" class="btn btn-secondary" id="btnTourPromptSkip" onclick="handleTourPromptChoice('skip')">
+                        暫時略過
+                    </button>
+                    <button type="button" class="btn btn-primary" id="btnTourPromptStart" onclick="handleTourPromptChoice('start')">
+                        開始指引 →
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="guidedTourLauncherModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="tourLauncherTitle" style="display: none;" onclick="if(event.target===this) closeModal('guidedTourLauncherModal')">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <div>
+                    <h3 id="tourLauncherTitle">🎓 互動式動態操作指引</h3>
+                    <p class="subtitle">選擇要查看的項目，將直接對應畫面位置逐步引導操作</p>
+                </div>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('guidedTourLauncherModal')">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="tour-launcher-cards">
+                    <div class="tour-launcher-card">
+                        <div class="tour-launcher-card-info">
+                            <span class="badge badge-info">指引一 · 共 6 步</span>
+                            <h4>標記檢視操作指引</h4>
+                            <p>認識工作區切換、照片篩選、畫布拉框微調與確認流程。</p>
+                        </div>
+                        <button type="button" class="btn btn-primary" onclick="startGuidedTourFromLauncher('post_load')">
+                            開始此指引
+                        </button>
+                    </div>
+                    <div class="tour-launcher-card">
+                        <div class="tour-launcher-card-info">
+                            <span class="badge badge-ok">指引二 · 共 4 步</span>
+                            <h4>批次套用操作指引</h4>
+                            <p>認識如何選取參考照片、勾選套用目標、調整設定並建立標記草稿。</p>
+                        </div>
+                        <button type="button" class="btn btn-primary" onclick="startGuidedTourFromLauncher('batch_apply')">
+                            開始此指引
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer" style="justify-content: space-between;">
+                <button type="button" class="btn btn-ghost btn-sm" onclick="resetGuidedTourDailyState()">
+                    重設「今日不再顯示」設定
+                </button>
+                <button type="button" class="btn btn-secondary" onclick="closeModal('guidedTourLauncherModal')">關閉</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="guidedTourOverlay" class="guided-tour-overlay" role="dialog" aria-modal="true" aria-labelledby="guidedTourStepTitle" style="display: none;">
+        <div id="guidedTourSpotlight" class="guided-tour-spotlight" aria-hidden="true">
+            <span id="guidedTourPulseTag" class="guided-tour-pulse-tag">聚焦區域</span>
+        </div>
+        <div id="guidedTourPopover" class="guided-tour-popover">
+            <div class="guided-tour-popover-header">
+                <div class="guided-tour-meta">
+                    <span id="guidedTourStepBadge" class="guided-tour-step-badge">步驟 1 / 6</span>
+                    <span id="guidedTourCategoryLabel" class="guided-tour-cat-label">操作指引</span>
+                </div>
+                <button type="button" class="btn-close guided-tour-close" aria-label="結束指引" title="結束指引 (Esc)" onclick="endGuidedTour('closed')">✕</button>
+            </div>
+            <div id="guidedTourDots" class="guided-tour-dots" aria-hidden="true"></div>
+            <h4 id="guidedTourStepTitle" class="guided-tour-title">步驟標題</h4>
+            <p id="guidedTourStepDesc" class="guided-tour-desc"></p>
+            <div id="guidedTourDemoStage" class="guided-tour-demo-stage" aria-label="動態操作示範"></div>
+            <div id="guidedTourStepTip" class="guided-tour-tip"></div>
+            <div class="guided-tour-footer">
+                <div class="guided-tour-footer-left">
+                    <button type="button" class="btn btn-ghost btn-sm" id="btnTourSkip" onclick="endGuidedTour('skipped')">略過</button>
+                    <button type="button" class="btn-link tour-inline-hide-btn" id="btnTourHideTodayInline" onclick="markCurrentTourHideToday()">今日不再顯示</button>
+                </div>
+                <div class="guided-tour-footer-right">
+                    <button type="button" class="btn btn-secondary btn-sm" id="btnTourPrev" onclick="stepGuidedTour(-1)">← 上一步</button>
+                    <button type="button" class="btn btn-primary btn-sm" id="btnTourNext" onclick="stepGuidedTour(1)">下一步 →</button>
+                    <button type="button" class="btn btn-primary btn-sm" id="btnTourFinish" onclick="endGuidedTour('completed')">結束指引 ✓</button>
+                </div>
             </div>
         </div>
     </div>
