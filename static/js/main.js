@@ -284,7 +284,6 @@ function toggleLoadSettingsPanel() { openModal('pathSettingsModal'); }
 
 
 const SHARED_CLASSES_LS_KEY = 'yolo_shared_classes_cfg_v1';
-const LAST_FOLDER_CLASSES_HINT_LS_KEY = 'yolo_last_folder_classes_hint_v1';
 const sharedClassesGuideDismissedWs = new Set();
 
 function canonSharedPath(p) {
@@ -318,36 +317,10 @@ function saveLocalSharedClassesCfg(cfg) {
     } catch (_) {}
 }
 
-function loadLastFolderClassesHint() {
-    try {
-        const raw = localStorage.getItem(LAST_FOLDER_CLASSES_HINT_LS_KEY);
-        if (!raw) return null;
-        const parsed = JSON.parse(raw);
-        if (parsed && parsed.folderPath && Array.isArray(parsed.classes) && parsed.classes.length > 0) {
-            return parsed;
-        }
-    } catch (_) {}
-    return null;
-}
-
 function isMemoryOrSampleScan(scan) {
     if (!scan || !scan.workspace_id) return true;
     const imgDir = String(scan.image_dir || '');
     return imgDir.startsWith('[記憶體範例]');
-}
-
-function recordPrevFolderClassesHint(scan) {
-    if (isMemoryOrSampleScan(scan)) return;
-    if (scan.shared_classes_info && scan.shared_classes_info.has_binding) return;
-    if (Array.isArray(scan.classes) && scan.classes.length > 0) {
-        try {
-            localStorage.setItem(LAST_FOLDER_CLASSES_HINT_LS_KEY, JSON.stringify({
-                folderPath: scan.image_dir || '',
-                folderName: scan.folder_name || scan.image_dir || '',
-                classes: scan.classes.map(c => String(c || '').trim()).filter(Boolean)
-            }));
-        } catch (_) {}
-    }
 }
 
 function isPathUnderSharedDir(folderPath, sharedFilePath) {
@@ -360,20 +333,6 @@ function isPathUnderSharedDir(folderPath, sharedFilePath) {
     const sDir = sParts.join('\\').replace(/\\+$/, '').toLowerCase();
     if (!sDir) return false;
     return fNorm === sDir || fNorm.startsWith(sDir + '\\');
-}
-
-function areSiblingOrSameTreePaths(pathA, pathB) {
-    const a = String(pathA || '').trim();
-    const b = String(pathB || '').trim();
-    if (!a || !b) return false;
-    if (canonSharedPath(a) === canonSharedPath(b)) return false;
-    if (a.startsWith('[') || b.startsWith('[')) return true;
-    const normA = a.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
-    const normB = b.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
-    const parentA = normA.includes('\\') ? normA.slice(0, normA.lastIndexOf('\\')) : '';
-    const parentB = normB.includes('\\') ? normB.slice(0, normB.lastIndexOf('\\')) : '';
-    if (!parentA || !parentB) return false;
-    return parentA === parentB || normA.startsWith(parentB + '\\') || normB.startsWith(parentA + '\\');
 }
 
 function computePythonSharedClassesInfo(scan, prevSharedInfo = null) {
@@ -542,107 +501,54 @@ function renderSharedClassesGuidance() {
             closeModal('sharedClassesSetupModal');
         }
     } else if ((!sInfo || !sInfo.has_binding) && !scanData.classes_file_exists && classesList.length === 0) {
-        const prevHint = loadLastFolderClassesHint();
-        const isRelatedPrev = Boolean(prevHint && areSiblingOrSameTreePaths(prevHint.folderPath, scanData.image_dir));
         const reuseLastSharedBtnHtml = (sInfo && sInfo.last_shared_available && sInfo.last_shared_name)
             ? `<button type="button" class="btn btn-primary" onclick="useLastSharedClassesForCurrentFolder()">🔗 沿用上次共用檔（${escapeHtml(sInfo.last_shared_name)}）</button>`
             : '';
-        if (isRelatedPrev) {
-            // 情境 B：同專案上層下剛標完 ok/，切進空白 ng/ 時優先跳大彈窗防止編號撞名
-            const prevNames = prevHint.classes.slice(0, 3).map((c, idx) => `${idx}: ${escapeHtml(c)}`).join('、');
-            const moreText = prevHint.classes.length > 3 ? ` 等 ${prevHint.classes.length} 類` : '';
-            const bringPreview = prevHint.classes.slice(0, 2).map(escapeHtml).join('、') + (prevHint.classes.length > 2 ? '…' : '');
-            modalConfig = {
-                isWarn: true,
-                title: `「${escapeHtml(scanData.folder_name || '目前資料夾')}」尚未建立 classes.txt`,
-                subtitle: `上個資料夾「${escapeHtml(prevHint.folderName)}」已建有 [${prevNames}${moreText}]，建議共用以免編號撞名。`,
-                bodyHtml: `
-                    <div class="setup-cards-grid">
-                        <div class="setup-option-card is-recommended">
-                            <div class="setup-option-head">
-                                <h4>📂 共用同一份清單</h4>
-                                <span class="setup-rec-tag">推薦</span>
-                            </div>
-                            <p class="setup-option-desc">帶入「${escapeHtml(prevHint.folderName)}」類別，新增時自動接續編號。</p>
-                            <pre class="setup-folder-tree">📂 上層共用資料夾/
-  ├── 🏷️ classes.txt  (含 ${bringPreview} + 新類別)
-  ├── 📁 ${escapeHtml(prevHint.folderName)}/
-  └── 📁 ${escapeHtml(scanData.folder_name || '目前資料夾')}/</pre>
-                            <div class="setup-card-actions">
-                                <button type="button" class="btn btn-primary btn-lg" onclick="createSharedClassesFromPrevHint()">✨ 新建共用檔（帶入：${bringPreview}）</button>
-                                <button type="button" class="btn btn-secondary" onclick="pickSharedClassesFile()">📄 挑選現有檔案</button>
-                            </div>
+        // 全新無 classes.txt 的資料夾 — 寬敞雙欄圖示決策彈窗
+        modalConfig = {
+            isWarn: false,
+            title: '尚未建立類別檔 (classes.txt)',
+            subtitle: '',
+            bodyHtml: `
+                <div class="setup-cards-grid">
+                    <div class="setup-option-card">
+                        <div class="setup-option-head">
+                            <h4>📁 只有這一個資料夾</h4>
                         </div>
-                        <div class="setup-option-card">
-                            <div class="setup-option-head">
-                                <h4>📁 此資料夾各自獨立使用</h4>
-                            </div>
-                            <p class="setup-option-desc">從編號 0 建立自己的類別檔。</p>
-                            <pre class="setup-folder-tree">📂 ${escapeHtml(scanData.folder_name || '目前資料夾')}/
-  ├── 🖼️ 照片與 📄 標記檔
-  └── 🏷️ classes.txt  (獨立編號 0)</pre>
-                            <div class="setup-card-actions">
-                                <button type="button" class="btn btn-secondary btn-lg" onclick="startSingleFolderDirect()">＋ 獨立畫框 (W)</button>
-                            </div>
-                        </div>
-                    </div>
-                `
-            };
-            loadCardTheme = 'guide-warn';
-            loadCardHtml = buildSharedGuideBannerHtml({
-                title: `⚠️ 尚未建立 classes.txt（前資料夾已有 ${prevNames}${moreText}）`,
-                desc: '',
-                actions: [
-                    { label: '設定類別檔', cls: 'btn btn-primary btn-sm', onclick: 'openSharedClassesSetupModalManually()' }
-                ]
-            });
-        } else {
-            // 情境 A：全新無 classes.txt 的資料夾 — 寬敞雙欄圖示決策彈窗
-            modalConfig = {
-                isWarn: false,
-                title: '尚未建立類別檔 (classes.txt)',
-                subtitle: '',
-                bodyHtml: `
-                    <div class="setup-cards-grid">
-                        <div class="setup-option-card">
-                            <div class="setup-option-head">
-                                <h4>📁 只有這一個資料夾</h4>
-                            </div>
-                            <p class="setup-option-desc">畫框後自動於此資料夾建立 <code>classes.txt</code>。</p>
-                            <pre class="setup-folder-tree">📂 ${escapeHtml(scanData.folder_name || '專案資料夾')}/
+                        <p class="setup-option-desc">畫框後自動於此資料夾建立 <code>classes.txt</code>。</p>
+                        <pre class="setup-folder-tree">📂 ${escapeHtml(scanData.folder_name || '專案資料夾')}/
   ├── 🖼️ 照片_01.jpg
   ├── 📄 照片_01.txt
   └── 🏷️ classes.txt  ← 自動建在這</pre>
-                            <div class="setup-card-actions">
-                                <button type="button" class="btn btn-primary btn-lg" onclick="startSingleFolderDirect()">＋ 直接畫框 (W)</button>
-                            </div>
+                        <div class="setup-card-actions">
+                            <button type="button" class="btn btn-primary btn-lg" onclick="startSingleFolderDirect()">＋ 直接畫框 (W)</button>
                         </div>
-                        <div class="setup-option-card">
-                            <div class="setup-option-head">
-                                <h4>📂 分成多個資料夾（如 ok/、ng/）</h4>
-                            </div>
-                            <p class="setup-option-desc">把類別檔放上一層共用，切換資料夾自動同步。</p>
-                            <pre class="setup-folder-tree">📂 上層資料夾/
+                    </div>
+                    <div class="setup-option-card">
+                        <div class="setup-option-head">
+                            <h4>📂 分成多個資料夾（如 ok/、ng/）</h4>
+                        </div>
+                        <p class="setup-option-desc">把類別檔放上一層共用，切換資料夾自動同步。</p>
+                        <pre class="setup-folder-tree">📂 上層資料夾/
   ├── 🏷️ classes.txt  ← 共用這份
   ├── 📁 ok/  (照片與標記)
   └── 📁 ng/  (照片與標記)</pre>
-                            <div class="setup-card-actions">
-                                ${reuseLastSharedBtnHtml}
-                                <button type="button" class="btn btn-secondary btn-lg" onclick="createSharedClassesFile()">✨ 新建共用檔</button>
-                                <button type="button" class="btn btn-ghost" onclick="pickSharedClassesFile()">📄 挑選現有檔案</button>
-                            </div>
+                        <div class="setup-card-actions">
+                            ${reuseLastSharedBtnHtml}
+                            <button type="button" class="btn btn-secondary btn-lg" onclick="createSharedClassesFile()">✨ 新建共用檔</button>
+                            <button type="button" class="btn btn-ghost" onclick="pickSharedClassesFile()">📄 挑選現有檔案</button>
                         </div>
                     </div>
-                `
-            };
-            loadCardHtml = buildSharedGuideBannerHtml({
-                title: '💡 尚未建立類別檔 (classes.txt)',
-                desc: '',
-                actions: [
-                    { label: '設定類別檔', cls: 'btn btn-primary btn-sm', onclick: 'openSharedClassesSetupModalManually()' }
-                ]
-            });
-        }
+                </div>
+            `
+        };
+        loadCardHtml = buildSharedGuideBannerHtml({
+            title: '💡 尚未建立類別檔 (classes.txt)',
+            desc: '',
+            actions: [
+                { label: '設定類別檔', cls: 'btn btn-primary btn-sm', onclick: 'openSharedClassesSetupModalManually()' }
+            ]
+        });
     }
 
     if (loadCardHtml) {
@@ -800,17 +706,6 @@ async function createSharedClassesFile(options = {}) {
     }
 }
 
-async function createSharedClassesFromPrevHint() {
-    const prevHint = loadLastFolderClassesHint();
-    if (!prevHint || !Array.isArray(prevHint.classes) || prevHint.classes.length === 0) {
-        return createSharedClassesFile();
-    }
-    return createSharedClassesFile({
-        initialClasses: prevHint.classes,
-        extraBoundPaths: prevHint.folderPath ? [prevHint.folderPath] : []
-    });
-}
-
 async function pickSharedClassesFile() {
     if (isPickingPath) {
         showToast('選擇視窗已經開啟，請查看桌面或瀏覽器對話框。', 'info');
@@ -818,8 +713,6 @@ async function pickSharedClassesFile() {
     }
     isPickingPath = true;
     try {
-        const prevHint = loadLastFolderClassesHint();
-        const extraBoundPaths = prevHint?.folderPath ? [prevHint.folderPath] : [];
         const res = await fetch('/api/pick_path', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -827,13 +720,12 @@ async function pickSharedClassesFile() {
                 mode: 'file',
                 title: '選擇共用的 classes.txt 類別定義檔',
                 initial_dir: scanData?.image_dir || '',
-                prefer_parent: true,
-                extra_bound_paths: extraBoundPaths
+                prefer_parent: true
             })
         });
         const data = await res.json();
         if (data.ok && data.path) {
-            const ok = await applyPickedSharedClassesResult(data, extraBoundPaths);
+            const ok = await applyPickedSharedClassesResult(data);
             if (ok) {
                 showToast(`已連結共用類別檔：${data.file_name || data.path}`, 'success');
             }
@@ -1080,7 +972,6 @@ async function scanCurrentWorkspace(options = {}) {
             }
             showToast(`原本共用的「${missingName}」已被刪除或移動，已自動清除舊設定，請重新選擇類別檔。`, 'warn');
         }
-        recordPrevFolderClassesHint(scanData);
         status.hidden = true;
         document.getElementById('inputImageDir').value = data.image_dir;
         document.getElementById('inputImageDirLoaded').value = data.image_dir;
@@ -2642,7 +2533,6 @@ async function confirmNewBoxClassModal() {
     markCanvasDraftDirty(item, snap);
     if (isBrandNewClass) {
         renderClassRemapEditor();
-        recordPrevFolderClassesHint(scanData);
         showToast(`已新增類別「${targetName}」`, 'success');
     }
     renderSharedClassesGuidance();
@@ -3822,7 +3712,6 @@ function applySingleSavePatch(data) {
     }
 
     recomputeClientSummaryCounts();
-    recordPrevFolderClassesHint(scanData);
     renderSharedClassesGuidance();
 }
 
