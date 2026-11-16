@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#17232A">
     <title>AI 影像標記工具</title>
+    <link rel="manifest" href="./manifest.json">
+    <link rel="icon" href="./static/icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="./static/css/style.css">
 </head>
 <body>
@@ -227,6 +230,12 @@
                                     <div id="copyClassFilterCheckboxes" class="class-check-wrap"></div>
                                 </div>
                                 <div class="adv-row">
+                                    <label class="checkbox-inline" title="複製時自動以 ZNCC 演算法比對參考照片局部特徵，自動追蹤物體微幅位移並修正標記框座標">
+                                        <input type="checkbox" id="chkSmartAlign" checked>
+                                        <span><strong>智慧局部對齊 (ZNCC)</strong>（自動微調偏移的物體座標）</span>
+                                    </label>
+                                </div>
+                                <div class="adv-row">
                                     <label class="checkbox-inline">
                                         <input type="checkbox" id="chkOverwriteExisting" onchange="runMasterCopyPreview()">
                                         <span><strong>覆蓋既有標記</strong></span>
@@ -309,6 +318,7 @@
                                 <span id="zoomLevelText" class="zoom-label" role="status">適應視窗</span>
                                 <button class="btn-xs" onclick="adjustZoom(1.18)" title="放大" aria-label="放大">+</button>
                                 <button class="btn-xs" onclick="resetZoom()" title="回到適應視窗大小">重設縮放</button>
+                                <button type="button" class="btn-xs btn-loupe-toggle active" id="btnToggleLoupe" aria-pressed="true" onclick="toggleMagnifierLoupe()" title="新增框或拖曳控制點時顯示游標處 4 倍貼齊邊緣放大鏡 (快捷鍵 M)">🔍 放大鏡 (M)</button>
                             </div>
                         </div>
 
@@ -520,6 +530,10 @@
                             <td>切換<strong>「＋ 新增框」</strong>模式，於畫布拖曳拉出標記框後立即輸入新類別名稱並自動追加類別 ID（按 <kbd>Esc</kbd> 取消）</td>
                         </tr>
                         <tr>
+                            <td><kbd>M</kbd></td>
+                            <td>切換<strong>「🔍 貼齊邊緣放大鏡」</strong>（於新增框或拉動 8 點控制點時，顯示游標處 4 倍像素級放大鏡與十字準星）</td>
+                        </tr>
+                        <tr>
                             <td><kbd>B</kbd></td>
                             <td><strong>複製選取框</strong>（將目前選取的標記框複製一份並自動儲存）</td>
                         </tr>
@@ -596,6 +610,7 @@
     <div id="toastContainer" class="toast-container"></div>
 
     <script>window.YOLO_WEB_MODE = true;</script>
+    <script src="./static/js/shared_rules.js"></script>
     <script src="./static/js/web_fs_engine.js"></script>
     <script src="./static/js/main.js"></script>
 </body>

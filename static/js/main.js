@@ -53,6 +53,7 @@ let canvasRenderState = null;
 let selectedBoxIndex = -1;
 let dragAction = null;
 let isDrawBoxMode = false;
+let isMagnifierLoupeEnabled = true;
 let defaultDrawClassId = 0;
 let canvasHoverPos = null;
 let pendingNewBox = null;
@@ -745,49 +746,75 @@ function renderClassFilterCheckboxes() {
     }).join('');
 }
 
-function renderCopyPhotoGrid() {
+let copyGridRenderedCount = 120;
+let copyGridScrollBound = false;
+
+function buildCopyPhotoCardHtml(item) {
+    const isRef = item.stem === masterStem;
+    const isSel = copySelectedStems.has(item.stem);
+    const simInfo = similarityMap[item.stem];
+
+    let cardCls = 'photo-card';
+    let roleTag = '';
+    if (isRef) {
+        cardCls += ' is-reference';
+        roleTag = `<span class="card-role-tag ref">參考</span>`;
+    } else if (isSel) {
+        cardCls += ' is-selected';
+        roleTag = `<span class="card-role-tag sel">已選</span>`;
+    }
+
+    const statusBadge = item.has_label
+        ? `<span class="badge ${item.review_status === 'confirmed' ? 'badge-ok' : 'badge-warn'}">${escapeHtml(item.review_label)} (${item.box_count}框)</span>`
+        : `<span class="badge badge-info">未標記</span>`;
+
+    const simHtml = (!isRef && simInfo)
+        ? `<div style="font-size:var(--type-small);color:var(--primary-blue);font-weight:600;">${escapeHtml(simInfo.reason)}</div>`
+        : '';
+
+    return `
+        <button type="button" class="${cardCls}" data-copy-stem="${escapeHtml(item.stem)}" aria-pressed="${isSel}" aria-disabled="${isRef}" onclick="togglePhotoCardSelection('${escapeJsStr(item.stem)}')">
+            <div class="photo-card-thumb">
+                <img src="${workspaceImage(item.stem)}" loading="lazy" alt="${escapeHtml(item.image_name)}">
+                ${roleTag}
+            </div>
+            <div class="photo-card-body">
+                <div class="photo-card-title" title="${escapeHtml(item.image_name)}">${escapeHtml(item.image_name)}</div>
+                <div>${statusBadge}</div>
+                ${simHtml}
+            </div>
+        </button>
+    `;
+}
+
+function renderCopyPhotoGrid(resetCount = true) {
     const grid = document.getElementById('copyPhotoGrid');
     document.getElementById('copyTargetCount').textContent = copySelectedStems.size;
 
     const focusedStem = document.activeElement?.dataset?.copyStem;
     const photos = (scanData.items || []).filter(i => i.has_image);
-    grid.innerHTML = photos.map(item => {
-        const isRef = item.stem === masterStem;
-        const isSel = copySelectedStems.has(item.stem);
-        const simInfo = similarityMap[item.stem];
+    const vThreshold = window.YOLO_SHARED_RULES?.thresholds?.virtual_list_threshold || 150;
 
-        let cardCls = 'photo-card';
-        let roleTag = '';
-        if (isRef) {
-            cardCls += ' is-reference';
-            roleTag = `<span class="card-role-tag ref">參考</span>`;
-        } else if (isSel) {
-            cardCls += ' is-selected';
-            roleTag = `<span class="card-role-tag sel">已選</span>`;
+    if (photos.length <= vThreshold) {
+        grid.innerHTML = photos.map(buildCopyPhotoCardHtml).join('');
+    } else {
+        if (resetCount) copyGridRenderedCount = 120;
+        const slice = photos.slice(0, copyGridRenderedCount);
+        grid.innerHTML = slice.map(buildCopyPhotoCardHtml).join('');
+        if (!copyGridScrollBound) {
+            copyGridScrollBound = true;
+            grid.addEventListener('scroll', () => {
+                const allPhotos = (scanData?.items || []).filter(i => i.has_image);
+                if (allPhotos.length <= vThreshold || copyGridRenderedCount >= allPhotos.length) return;
+                if (grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 240) {
+                    const prevCount = copyGridRenderedCount;
+                    copyGridRenderedCount = Math.min(allPhotos.length, copyGridRenderedCount + 120);
+                    const nextChunk = allPhotos.slice(prevCount, copyGridRenderedCount);
+                    grid.insertAdjacentHTML('beforeend', nextChunk.map(buildCopyPhotoCardHtml).join(''));
+                }
+            }, { passive: true });
         }
-
-        const statusBadge = item.has_label
-            ? `<span class="badge ${item.review_status === 'confirmed' ? 'badge-ok' : 'badge-warn'}">${escapeHtml(item.review_label)} (${item.box_count}框)</span>`
-            : `<span class="badge badge-info">未標記</span>`;
-
-        const simHtml = (!isRef && simInfo)
-            ? `<div style="font-size:var(--type-small);color:var(--primary-blue);font-weight:600;">${escapeHtml(simInfo.reason)}</div>`
-            : '';
-
-        return `
-            <button type="button" class="${cardCls}" data-copy-stem="${escapeHtml(item.stem)}" aria-pressed="${isSel}" aria-disabled="${isRef}" onclick="togglePhotoCardSelection('${escapeJsStr(item.stem)}')">
-                <div class="photo-card-thumb">
-                    <img src="${workspaceImage(item.stem)}" loading="lazy" alt="${escapeHtml(item.image_name)}">
-                    ${roleTag}
-                </div>
-                <div class="photo-card-body">
-                    <div class="photo-card-title" title="${escapeHtml(item.image_name)}">${escapeHtml(item.image_name)}</div>
-                    <div>${statusBadge}</div>
-                    ${simHtml}
-                </div>
-            </button>
-        `;
-    }).join('');
+    }
     if (focusedStem) Array.from(grid.querySelectorAll('[data-copy-stem]')).find(el => el.dataset.copyStem === focusedStem)?.focus();
 }
 
@@ -1032,6 +1059,9 @@ async function runMasterCopyExecute() {
     banner.style.display = 'flex';
     banner.textContent = '正在寫入標記檔並建立備份…';
     try {
+        const smartAlign = document.getElementById('chkSmartAlign')
+            ? Boolean(document.getElementById('chkSmartAlign').checked)
+            : true;
         const res = await workspaceFetch('/api/master_copy/execute', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1040,7 +1070,8 @@ async function runMasterCopyExecute() {
                 target_stems: targetStems,
                 overwrite,
                 output_dir: outputDir || null,
-                selected_classes: selectedClasses
+                selected_classes: selectedClasses,
+                smart_align: smartAlign
             })
         });
         const data = await res.json();
@@ -1181,11 +1212,39 @@ function ensureValidActiveItemForReview() {
     else if (!activeStem || !list.some(i => i.stem === activeStem)) activeStem = list[0].stem;
 }
 
-function renderStudioFileList() {
+let studioVirtualScrollBound = false;
+let lastVirtualScrolledStem = null;
+
+function buildStudioListItemHtml(item, idx) {
+    const isAct = item.stem === activeStem;
+    const isRef = item.stem === masterStem;
+
+    let revBadge = `<span class="badge badge-warn">[!] 待確認</span>`;
+    if (item.review_status === 'confirmed') revBadge = `<span class="badge badge-ok">[✓] 已確認</span>`;
+    else if (item.review_status === 'needs_fix') revBadge = `<span class="badge badge-err">[!] 需修正</span>`;
+    else if (item.review_status === 'unlabeled') revBadge = `<span class="badge badge-info">未標記</span>`;
+
+    const fmtWarn = item.has_blocking_error
+        ? `<span class="text-red" style="font-weight:700;">[✕ ${escapeHtml(item.format_label)}]</span>`
+        : '';
+
+    return `
+        <button type="button" class="review-list-item ${isAct ? 'active' : ''} ${isRef ? 'is-reference' : ''}" data-review-stem="${escapeHtml(item.stem)}" aria-current="${isAct ? 'true' : 'false'}" onclick="selectReviewItem('${escapeJsStr(item.stem)}')">
+            <div class="r-item-top">
+                <span class="r-item-name" title="${escapeHtml(item.image_name || item.stem)}">
+                    ${idx + 1}. ${escapeHtml(item.image_name || item.stem)}
+                </span>
+            </div>
+            <div class="r-item-sub">${revBadge}${isRef ? '<span class="ref-badge">★ 參考照片</span>' : ''}<span>${item.box_count} 框</span></div>
+            ${fmtWarn ? `<div class="list-error">${fmtWarn}</div>` : ''}
+        </button>
+    `;
+}
+
+function renderStudioFileList(fromScroll = false) {
     if (!scanData || !scanData.ok) return;
 
     const list = getActiveReviewItemsList();
-
     const container = document.getElementById('studioFileList');
     const focusedStem = document.activeElement?.dataset?.reviewStem;
     if (list.length === 0) {
@@ -1198,33 +1257,55 @@ function renderStudioFileList() {
         return;
     }
 
-    container.innerHTML = list.map((item, idx) => {
-        const isAct = item.stem === activeStem;
-        const isRef = item.stem === masterStem;
+    const vThreshold = window.YOLO_SHARED_RULES?.thresholds?.virtual_list_threshold || 150;
+    if (list.length <= vThreshold) {
+        container.innerHTML = list.map((item, idx) => buildStudioListItemHtml(item, idx)).join('');
+        if (focusedStem) Array.from(container.querySelectorAll('[data-review-stem]')).find(el => el.dataset.reviewStem === focusedStem)?.focus();
+        container.querySelector('[aria-current="true"]')?.scrollIntoView({ block: 'nearest' });
+        return;
+    }
 
-        let revBadge = `<span class="badge badge-warn">[!] 待確認</span>`;
-        if (item.review_status === 'confirmed') revBadge = `<span class="badge badge-ok">[✓] 已確認</span>`;
-        else if (item.review_status === 'needs_fix') revBadge = `<span class="badge badge-err">[!] 需修正</span>`;
-        else if (item.review_status === 'unlabeled') revBadge = `<span class="badge badge-info">未標記</span>`;
+    // 大資料集 (2,000+ 張照片) 視窗化虛擬捲動 (Virtual Windowed List)
+    const ROW_EST_HEIGHT = 72;
+    if (!fromScroll && activeStem && lastVirtualScrolledStem !== activeStem) {
+        const activeIdx = list.findIndex(i => i.stem === activeStem);
+        if (activeIdx >= 0) {
+            const targetTop = activeIdx * ROW_EST_HEIGHT;
+            const viewH = container.clientHeight || 480;
+            if (targetTop < container.scrollTop || targetTop + ROW_EST_HEIGHT > container.scrollTop + viewH) {
+                container.scrollTop = Math.max(0, targetTop - Math.floor(viewH / 2));
+            }
+        }
+        lastVirtualScrolledStem = activeStem;
+    }
 
-        const fmtWarn = item.has_blocking_error
-            ? `<span class="text-red" style="font-weight:700;">[✕ ${escapeHtml(item.format_label)}]</span>`
-            : '';
+    const scrollTop = container.scrollTop || 0;
+    const startIdx = Math.max(0, Math.floor(scrollTop / ROW_EST_HEIGHT) - 8);
+    const endIdx = Math.min(list.length, startIdx + 36);
+    const topPad = startIdx * ROW_EST_HEIGHT;
+    const bottomPad = Math.max(0, (list.length - endIdx) * ROW_EST_HEIGHT);
 
-        return `
-            <button type="button" class="review-list-item ${isAct ? 'active' : ''} ${isRef ? 'is-reference' : ''}" data-review-stem="${escapeHtml(item.stem)}" aria-current="${isAct ? 'true' : 'false'}" onclick="selectReviewItem('${escapeJsStr(item.stem)}')">
-                <div class="r-item-top">
-                    <span class="r-item-name" title="${escapeHtml(item.image_name || item.stem)}">
-                        ${idx + 1}. ${escapeHtml(item.image_name || item.stem)}
-                    </span>
-                </div>
-                <div class="r-item-sub">${revBadge}${isRef ? '<span class="ref-badge">★ 參考照片</span>' : ''}<span>${item.box_count} 框</span></div>
-                ${fmtWarn ? `<div class="list-error">${fmtWarn}</div>` : ''}
-            </button>
-        `;
-    }).join('');
+    container.innerHTML =
+        `<div style="height:${topPad}px;flex-shrink:0;" aria-hidden="true"></div>` +
+        list.slice(startIdx, endIdx).map((item, i) => buildStudioListItemHtml(item, startIdx + i)).join('') +
+        `<div style="height:${bottomPad}px;flex-shrink:0;" aria-hidden="true"></div>`;
+
     if (focusedStem) Array.from(container.querySelectorAll('[data-review-stem]')).find(el => el.dataset.reviewStem === focusedStem)?.focus();
-    container.querySelector('[aria-current="true"]')?.scrollIntoView({block: 'nearest'});
+
+    if (!studioVirtualScrollBound) {
+        studioVirtualScrollBound = true;
+        let rafPending = false;
+        container.addEventListener('scroll', () => {
+            if (rafPending) return;
+            const curList = getActiveReviewItemsList();
+            if (curList.length <= vThreshold) return;
+            rafPending = true;
+            requestAnimationFrame(() => {
+                rafPending = false;
+                renderStudioFileList(true);
+            });
+        }, { passive: true });
+    }
 }
 
 function selectReviewItem(stem) {
@@ -1850,6 +1931,126 @@ function adjustZoom(factor) {
     }
 }
 
+function toggleMagnifierLoupe(forceState) {
+    if (typeof forceState === 'boolean') {
+        isMagnifierLoupeEnabled = forceState;
+    } else {
+        isMagnifierLoupeEnabled = !isMagnifierLoupeEnabled;
+    }
+    const btn = document.getElementById('btnToggleLoupe');
+    if (btn) {
+        btn.classList.toggle('active', isMagnifierLoupeEnabled);
+        btn.setAttribute('aria-pressed', String(isMagnifierLoupeEnabled));
+    }
+    redrawCanvases();
+}
+
+function drawMagnifierLoupeOnCanvas(ctx, drawW, drawH, item) {
+    if (!isMagnifierLoupeEnabled || !canvasHoverPos || !targetImgObj || !canvasRenderState) return;
+    const isActivelyAligning = Boolean(
+        isDrawBoxMode ||
+        (dragAction && (dragAction.mode === 'create' || dragAction.mode === 'resize'))
+    );
+    if (!isActivelyAligning) return;
+
+    const { imgW, imgH } = canvasRenderState;
+    const cx = Math.max(0, Math.min(drawW, canvasHoverPos.x));
+    const cy = Math.max(0, Math.min(drawH, canvasHoverPos.y));
+    const normX = cx / Math.max(1, drawW);
+    const normY = cy / Math.max(1, drawH);
+    const srcCenterX = normX * imgW;
+    const srcCenterY = normY * imgH;
+
+    const loupeSize = 132;
+    const mag = 4.0;
+    const halfLoupe = loupeSize / 2;
+
+    // 智慧避讓位置：預設顯示於游標右上方，靠近邊界時自動翻轉至對側，絕不遮擋十字準星
+    let lx = cx + 24;
+    let ly = cy - loupeSize - 24;
+    if (lx + loupeSize + 8 > drawW) {
+        lx = Math.max(8, cx - loupeSize - 24);
+    }
+    if (ly < 8) {
+        ly = Math.min(Math.max(8, drawH - loupeSize - 28), cy + 24);
+    }
+
+    const srcSpanW = (loupeSize / mag) * (imgW / Math.max(1, drawW));
+    const srcSpanH = (loupeSize / mag) * (imgH / Math.max(1, drawH));
+    const sx = srcCenterX - srcSpanW / 2;
+    const sy = srcCenterY - srcSpanH / 2;
+
+    ctx.save();
+    // 外框陰影與底色
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = '#0F172A';
+    ctx.fillRect(lx, ly, loupeSize, loupeSize + 22);
+    ctx.shadowBlur = 0;
+
+    // 裁切放大鏡視窗並關閉平滑以呈現清晰像素邊緣
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(lx, ly, loupeSize, loupeSize);
+    ctx.clip();
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(targetImgObj, sx, sy, srcSpanW, srcSpanH, lx, ly, loupeSize, loupeSize);
+
+    // 同步繪製目前正在拉動或縮放的標記框邊緣線於放大鏡內
+    ctx.strokeStyle = '#F08A4C';
+    ctx.lineWidth = 1.5;
+    if (dragAction && dragAction.mode === 'create') {
+        const rx = Math.min(dragAction.startX, dragAction.curX);
+        const ry = Math.min(dragAction.startY, dragAction.curY);
+        const rw = Math.abs(dragAction.curX - dragAction.startX);
+        const rh = Math.abs(dragAction.curY - dragAction.startY);
+        ctx.strokeRect(
+            lx + halfLoupe + (rx - cx) * mag,
+            ly + halfLoupe + (ry - cy) * mag,
+            rw * mag,
+            rh * mag
+        );
+    } else if (selectedBoxIndex >= 0 && item?.boxes?.[selectedBoxIndex]) {
+        const sb = item.boxes[selectedBoxIndex];
+        const sbw = sb.w * drawW, sbh = sb.h * drawH;
+        const sbx = sb.xc * drawW - sbw / 2, sby = sb.yc * drawH - sbh / 2;
+        ctx.strokeRect(
+            lx + halfLoupe + (sbx - cx) * mag,
+            ly + halfLoupe + (sby - cy) * mag,
+            sbw * mag,
+            sbh * mag
+        );
+    }
+
+    // 中心精準十字準星 (Crosshair)
+    const midX = lx + halfLoupe;
+    const midY = ly + halfLoupe;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(lx, midY); ctx.lineTo(midX - 4, midY);
+    ctx.moveTo(midX + 4, midY); ctx.lineTo(lx + loupeSize, midY);
+    ctx.moveTo(midX, ly); ctx.lineTo(midX, midY - 4);
+    ctx.moveTo(midX, midY + 4); ctx.lineTo(midX, ly + loupeSize);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#F08A4C';
+    ctx.strokeRect(midX - 3, midY - 3, 6, 6);
+    ctx.restore();
+
+    // 放大鏡邊框與底部像素座標列
+    ctx.strokeStyle = '#F08A4C';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(lx, ly, loupeSize, loupeSize + 22);
+    ctx.fillStyle = '#1E293B';
+    ctx.fillRect(lx + 1, ly + loupeSize, loupeSize - 2, 21);
+    ctx.fillStyle = '#F8FAFC';
+    ctx.font = 'bold 11px Consolas, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`4× | X:${Math.round(srcCenterX)} Y:${Math.round(srcCenterY)}`, lx + halfLoupe, ly + loupeSize + 15);
+    ctx.restore();
+}
+
 function resetZoom() {
     zoomMultiplier = 1.0;
     document.getElementById('zoomLevelText').textContent = '適應視窗';
@@ -2081,6 +2282,9 @@ function redrawCanvases() {
             ctx.restore();
         }
     }
+
+    // 貼齊邊緣放大鏡 (Magnifier Loupe)：於拉框或調整 8 點控制點時顯示局部 4 倍像素放大與準星
+    drawMagnifierLoupeOnCanvas(ctx, drawW, drawH, item);
 
     // 並排比較模式：繪製左側參考照片畫布
     if (previewMode === 'side_by_side') {
@@ -2475,6 +2679,7 @@ function initCanvasInteraction() {
             }
         } else if (dragAction.mode === 'resize') {
             dragAction.modified = true;
+            canvasHoverPos = { x: mx, y: my };
             const ob = dragAction.origBox;
             let x1 = ob.xc - ob.w / 2;
             let y1 = ob.yc - ob.h / 2;
@@ -2547,12 +2752,14 @@ function initCanvasInteraction() {
         }
 
         if (dragAction.modified && item) {
+            if (!isDrawBoxMode) canvasHoverPos = null;
             saveCanvasBoxesToDisk(item.stem, item.boxes);
         } else if (dragAction.mode === 'move' && dragAction.wasAlreadySelected && isCanvasZoomedOrScrollable(mainWrapper)) {
             // 在放大狀態下若單擊已選取的標記框且未拖動，可取消選取以便隨時拖移照片
             selectedBoxIndex = -1;
             renderInspectorAndCanvas();
         }
+        if (!isDrawBoxMode) canvasHoverPos = null;
         dragAction = null;
     });
 }
@@ -2904,6 +3111,9 @@ function initKeyboardShortcuts() {
         } else if (e.key === 'w' || e.key === 'W') {
             e.preventDefault();
             toggleDrawBoxMode();
+        } else if (e.key === 'm' || e.key === 'M') {
+            e.preventDefault();
+            toggleMagnifierLoupe();
         } else if (e.key === 'b' || e.key === 'B') {
             e.preventDefault();
             duplicateSelectedBoxOnCanvas();

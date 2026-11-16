@@ -2302,3 +2302,9 @@ button:disabled { cursor: not-allowed; }
     flex-shrink: 0;
     margin: auto;
 }
+.btn-loupe-toggle.active {
+    background: var(--primary-blue-light);
+    color: var(--primary-blue);
+    border-color: var(--primary-blue);
+    font-weight: 700;
+}

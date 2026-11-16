@@ -9,8 +9,27 @@
 (function () {
     'use strict';
 
-    const SUPPORTED_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.webp']);
-    const RESERVED_CLASS_FILENAMES = new Set(['classes.txt', 'predefined_classes.txt', 'obj.names']);
+    const SHARED_RULES = (typeof window !== 'undefined' && window.YOLO_SHARED_RULES) || {
+        supported_image_exts: ['.jpg', '.jpeg', '.png', '.bmp', '.webp'],
+        reserved_class_filenames: ['classes.txt', 'predefined_classes.txt', 'obj.names'],
+        thresholds: {
+            tiny_box_min_dim: 0.005,
+            oversize_box_max_dim: 1.001,
+            edge_out_of_bounds_tol: 0.002,
+            duplicate_box_iou: 0.88,
+            aspect_ratio_mismatch: 0.015,
+            default_similarity: 0.75,
+            dhash_size: 8,
+            virtual_list_threshold: 150
+        }
+    };
+    const YOLO_THRESHOLDS = SHARED_RULES.thresholds;
+    const SUPPORTED_IMAGE_EXTS = new Set(SHARED_RULES.supported_image_exts);
+    const RESERVED_CLASS_FILENAMES = new Set(SHARED_RULES.reserved_class_filenames);
+
+    function yieldToMainThread() {
+        return new Promise(resolve => setTimeout(resolve, 0));
+    }
 
     // 自動判斷是否啟用純前端引擎：
     // 1. 明確設定 window.YOLO_WEB_MODE === true (GitHub Pages 根目錄 index.html)
@@ -96,40 +115,103 @@
     // ========================================================================
     const imageMetaCache = new Map();
 
-    function parseExifOrientation(buffer) {
+    function parseImageHeaderDimensionsAndExif(buffer) {
+        let width = 0;
+        let height = 0;
+        let orientation = 1;
         try {
             const view = new DataView(buffer);
-            if (view.byteLength < 4 || view.getUint16(0, false) !== 0xFFD8) return 1;
-            let offset = 2;
-            while (offset + 4 <= view.byteLength) {
-                const marker = view.getUint16(offset, false);
-                offset += 2;
-                if (marker === 0xFFE1) {
-                    const length = view.getUint16(offset, false);
-                    if (offset + 8 <= view.byteLength && view.getUint32(offset + 2, false) === 0x45786966) {
+            const len = view.byteLength;
+            if (len < 16) return { width: 0, height: 0, orientation: 1 };
+
+            // 1. PNG (89 50 4E 47 0D 0A 1A 0A)
+            if (view.getUint32(0, false) === 0x89504E47 && len >= 24) {
+                width = view.getUint32(16, false);
+                height = view.getUint32(20, false);
+                return { width, height, orientation: 1 };
+            }
+
+            // 2. BMP (42 4D)
+            if (view.getUint16(0, false) === 0x424D && len >= 26) {
+                width = Math.abs(view.getInt32(18, true));
+                height = Math.abs(view.getInt32(22, true));
+                return { width, height, orientation: 1 };
+            }
+
+            // 3. WEBP (RIFF....WEBP)
+            if (view.getUint32(0, false) === 0x52494646 && view.getUint32(8, false) === 0x57454250 && len >= 30) {
+                const chunkType = view.getUint32(12, false);
+                if (chunkType === 0x56503820 && len >= 30) { // 'VP8 '
+                    width = view.getUint16(26, true) & 0x3FFF;
+                    height = view.getUint16(28, true) & 0x3FFF;
+                } else if (chunkType === 0x5650384C && len >= 25) { // 'VP8L'
+                    const b = view.getUint32(21, true);
+                    width = (b & 0x3FFF) + 1;
+                    height = ((b >> 14) & 0x3FFF) + 1;
+                } else if (chunkType === 0x56503858 && len >= 30) { // 'VP8X'
+                    width = 1 + (view.getUint8(24) | (view.getUint8(25) << 8) | (view.getUint8(26) << 16));
+                    height = 1 + (view.getUint8(27) | (view.getUint8(28) << 8) | (view.getUint8(29) << 16));
+                }
+                return { width, height, orientation: 1 };
+            }
+
+            // 4. JPEG (FF D8) — 同時解析 EXIF Orientation 與 SOF 寬高
+            if (view.getUint16(0, false) === 0xFFD8) {
+                let offset = 2;
+                while (offset + 4 <= len) {
+                    if (view.getUint8(offset) !== 0xFF) {
+                        offset += 1;
+                        continue;
+                    }
+                    const marker = view.getUint16(offset, false);
+                    offset += 2;
+                    if (marker === 0xFFD8 || marker === 0xFFD9 || (marker >= 0xFFD0 && marker <= 0xFFD7)) {
+                        continue;
+                    }
+                    if (offset + 2 > len) break;
+                    const segLen = view.getUint16(offset, false);
+                    if (segLen < 2) break;
+
+                    if (marker === 0xFFE1 && offset + 8 <= len && view.getUint32(offset + 2, false) === 0x45786966) {
                         const tiffOffset = offset + 8;
-                        const little = view.getUint16(tiffOffset, false) === 0x4949;
-                        const firstIfd = view.getUint32(tiffOffset + 4, little);
-                        const dirStart = tiffOffset + firstIfd;
-                        if (dirStart + 2 > view.byteLength) return 1;
-                        const entries = view.getUint16(dirStart, little);
-                        for (let i = 0; i < entries; i++) {
-                            const entryOffset = dirStart + 2 + i * 12;
-                            if (entryOffset + 12 > view.byteLength) break;
-                            if (view.getUint16(entryOffset, little) === 0x0112) {
-                                return view.getUint16(entryOffset + 8, little) || 1;
+                        if (tiffOffset + 8 <= len) {
+                            const little = view.getUint16(tiffOffset, false) === 0x4949;
+                            const firstIfd = view.getUint32(tiffOffset + 4, little);
+                            const dirStart = tiffOffset + firstIfd;
+                            if (dirStart + 2 <= len) {
+                                const entries = view.getUint16(dirStart, little);
+                                for (let i = 0; i < entries; i++) {
+                                    const entryOffset = dirStart + 2 + i * 12;
+                                    if (entryOffset + 12 > len) break;
+                                    if (view.getUint16(entryOffset, little) === 0x0112) {
+                                        orientation = view.getUint16(entryOffset + 8, little) || 1;
+                                        break;
+                                    }
+                                }
                             }
                         }
+                    } else if (
+                        (marker >= 0xFFC0 && marker <= 0xFFC3) ||
+                        (marker >= 0xFFC5 && marker <= 0xFFC7) ||
+                        (marker >= 0xFFC9 && marker <= 0xFFCB) ||
+                        (marker >= 0xFFCD && marker <= 0xFFCF)
+                    ) {
+                        if (offset + 7 <= len) {
+                            height = view.getUint16(offset + 3, false);
+                            width = view.getUint16(offset + 5, false);
+                            break;
+                        }
                     }
-                    offset += length;
-                } else if ((marker & 0xFF00) !== 0xFF00) {
-                    break;
-                } else {
-                    offset += view.getUint16(offset, false);
+                    offset += segLen;
+                }
+                if (orientation >= 5 && orientation <= 8 && width > 0 && height > 0) {
+                    const tmp = width;
+                    width = height;
+                    height = tmp;
                 }
             }
         } catch (_) {}
-        return 1;
+        return { width, height, orientation };
     }
 
     function computeCanvasDHash(imgEl, hashSize = 8) {
@@ -171,23 +253,46 @@
         return [ratio, dist, total];
     }
 
-    async function inspectImageBlob(cacheKey, blob, lastModified) {
+    async function inspectImageBlob(cacheKey, blob, lastModified, options = {}) {
+        const needDHash = Boolean(options.needDHash);
         const hit = imageMetaCache.get(cacheKey);
         if (hit && hit.lastModified === lastModified && hit.size === blob.size) {
-            return hit.meta;
+            if (!needDHash || (hit.meta.dhash && hit.meta.dhash.length > 0)) {
+                return hit.meta;
+            }
         }
         const ts = (lastModified || Date.now()) / 1000.0;
         const d = new Date(lastModified || Date.now());
         const pad = (n) => String(n).padStart(2, '0');
         const dtStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 
-        let exifOrientation = 1;
+        let headerInfo = { width: 0, height: 0, orientation: 1 };
         try {
             const slice = await blob.slice(0, 65536).arrayBuffer();
-            exifOrientation = parseExifOrientation(slice);
+            headerInfo = parseImageHeaderDimensionsAndExif(slice);
         } catch (_) {}
 
-        const objUrl = URL.createObjectURL(blob);
+        const objUrl = (hit && hit.meta && hit.meta.objectUrl) ? hit.meta.objectUrl : URL.createObjectURL(blob);
+
+        // 快速路徑：若二進位檔頭已成功解析出寬高，且初次掃描無須立即算 dHash，直接免解碼回傳（2,000+ 張照片秒級掃描）
+        if (!needDHash && headerInfo.width > 0 && headerInfo.height > 0) {
+            const meta = {
+                width: headerInfo.width,
+                height: headerInfo.height,
+                aspect_ratio: headerInfo.height > 0 ? Number((headerInfo.width / headerInfo.height).toFixed(4)) : 0.0,
+                has_exif_orientation: headerInfo.orientation !== 1,
+                exif_orientation: headerInfo.orientation,
+                timestamp: ts,
+                timestamp_source: 'file_mtime',
+                datetime_str: dtStr,
+                read_error: null,
+                dhash: hit?.meta?.dhash || null,
+                objectUrl: objUrl
+            };
+            imageMetaCache.set(cacheKey, { lastModified, size: blob.size, meta });
+            return meta;
+        }
+
         try {
             const img = await new Promise((resolve, reject) => {
                 const im = new Image();
@@ -195,15 +300,15 @@
                 im.onerror = () => reject(new Error('影像解碼失敗'));
                 im.src = objUrl;
             });
-            const w = img.naturalWidth || img.width || 0;
-            const h = img.naturalHeight || img.height || 0;
-            const dhash = computeCanvasDHash(img, 8);
+            const w = headerInfo.width || img.naturalWidth || img.width || 0;
+            const h = headerInfo.height || img.naturalHeight || img.height || 0;
+            const dhash = computeCanvasDHash(img, YOLO_THRESHOLDS.dhash_size || 8);
             const meta = {
                 width: w,
                 height: h,
                 aspect_ratio: h > 0 ? Number((w / h).toFixed(4)) : 0.0,
-                has_exif_orientation: exifOrientation !== 1,
-                exif_orientation: exifOrientation,
+                has_exif_orientation: headerInfo.orientation !== 1,
+                exif_orientation: headerInfo.orientation,
                 timestamp: ts,
                 timestamp_source: 'file_mtime',
                 datetime_str: dtStr,
@@ -211,9 +316,6 @@
                 dhash,
                 objectUrl: objUrl
             };
-            if (hit && hit.meta && hit.meta.objectUrl && hit.meta.objectUrl !== objUrl) {
-                try { URL.revokeObjectURL(hit.meta.objectUrl); } catch (_) {}
-            }
             imageMetaCache.set(cacheKey, { lastModified, size: blob.size, meta });
             return meta;
         } catch (err) {
@@ -351,11 +453,11 @@
             } catch (_) {}
         }
 
-        async getImageEntry(filename) {
+        async getImageEntry(filename, options = {}) {
             const fh = await this.dirHandle.getFileHandle(filename, { create: false });
             const file = await fh.getFile();
             const cacheKey = `${this.virtualPath}/${filename}`;
-            const meta = await inspectImageBlob(cacheKey, file, file.lastModified);
+            const meta = await inspectImageBlob(cacheKey, file, file.lastModified, options);
             return meta;
         }
 
@@ -472,11 +574,11 @@
             this.imageBlobs.delete(filename);
         }
 
-        async getImageEntry(filename) {
+        async getImageEntry(filename, options = {}) {
             if (!this.imageBlobs.has(filename)) throw new Error(`Image not found: ${filename}`);
             const entry = this.imageBlobs.get(filename);
             const cacheKey = `${this.virtualPath}/${filename}`;
-            return await inspectImageBlob(cacheKey, entry.blob, entry.lastModified);
+            return await inspectImageBlob(cacheKey, entry.blob, entry.lastModified, options);
         }
 
         async readWorkspaceJson(relName, fallbackObj) {
@@ -922,7 +1024,7 @@
                     reason: `第 ${lineNum} 行 (${className}) 標記框寬度或高度為 0 或負數`,
                     suggestion: '請於檢查頁選取此框按 Delete 刪除，或拉動控制點修正尺寸。'
                 });
-            } else if (w < 0.005 || h < 0.005) {
+            } else if (w < YOLO_THRESHOLDS.tiny_box_min_dim || h < YOLO_THRESHOLDS.tiny_box_min_dim) {
                 hasCoordErr = true;
                 issues.push({
                     level: 'warning',
@@ -932,7 +1034,7 @@
                     reason: `第 ${lineNum} 行 (${className}) 標記框尺寸極小 (${w.toFixed(4)}×${h.toFixed(4)})，疑似滑鼠誤點`,
                     suggestion: '請於畫布檢查是否為誤點產生的極小框，必要時按 Delete 刪除。'
                 });
-            } else if (w > 1.001 || h > 1.001) {
+            } else if (w > YOLO_THRESHOLDS.oversize_box_max_dim || h > YOLO_THRESHOLDS.oversize_box_max_dim) {
                 hasCoordErr = true;
                 issues.push({
                     level: 'error',
@@ -948,7 +1050,7 @@
             const ymin = yc - h / 2.0;
             const xmax = xc + w / 2.0;
             const ymax = yc + h / 2.0;
-            const tol = 0.002;
+            const tol = YOLO_THRESHOLDS.edge_out_of_bounds_tol;
 
             if (xc < 0.0 || xc > 1.0 || yc < 0.0 || yc > 1.0) {
                 hasCoordErr = true;
@@ -991,7 +1093,7 @@
         for (let i = 0; i < boxes.length; i++) {
             for (let j = i + 1; j < boxes.length; j++) {
                 const iou = computeIoU(boxes[i], boxes[j]);
-                if (iou >= 0.88) {
+                if (iou >= YOLO_THRESHOLDS.duplicate_box_iou) {
                     hasCoordErr = true;
                     const sameCls = boxes[i].class_id === boxes[j].class_id;
                     const clsDesc = sameCls
@@ -1176,7 +1278,17 @@
 
         activeState.imageUrlByStem.clear();
 
+        let processedIdx = 0;
+        const totalStems = allStems.length;
         for (const stem of allStems) {
+            processedIdx += 1;
+            if (processedIdx % 40 === 0) {
+                const statusEl = typeof document !== 'undefined' ? document.getElementById('workspaceLoadStatus') : null;
+                if (statusEl && !statusEl.hidden) {
+                    statusEl.textContent = `正在掃描照片與標記檔 (${processedIdx} / ${totalStems})…`;
+                }
+                await yieldToMainThread();
+            }
             const imgList = imagesByStem.get(stem) || [];
             const lblList = labelsByStem.get(stem) || [];
             const rec = savedItemMeta[stem] || {};
@@ -1635,6 +1747,22 @@
         const preferredMasterStem = payload.master_stem || null;
 
         const validItems = scanRes.items.filter(it => it.has_image);
+        const imageProvider = activeState.imageProvider;
+
+        // 批次分塊計算 dHash（每批 8 張並讓出主執行緒，2,000+ 張照片亦不凍結畫面）
+        const itemsNeedingHash = validItems.filter(it => !it.dhash || it.dhash.length === 0);
+        const BATCH_SIZE = 8;
+        for (let i = 0; i < itemsNeedingHash.length; i += BATCH_SIZE) {
+            const chunk = itemsNeedingHash.slice(i, i + BATCH_SIZE);
+            await Promise.all(chunk.map(async (it) => {
+                const meta = await imageProvider.getImageEntry(it.image_name, { needDHash: true });
+                it.dhash = meta.dhash || new Uint8Array(0);
+            }));
+            if (i > 0 && i % 24 === 0) {
+                await yieldToMainThread();
+            }
+        }
+
         let candidateMasters = validItems.filter(it => it.pair_type === 'paired' && it.box_count > 0 && !it.has_blocking_error);
 
         if (preferredMasterStem) {
@@ -1903,6 +2031,21 @@
         };
     }
 
+    async function loadImageElementByStem(stem) {
+        const objUrl = activeState.imageUrlByStem.get(stem);
+        if (!objUrl) return null;
+        try {
+            return await new Promise((resolve, reject) => {
+                const im = new Image();
+                im.onload = () => resolve(im);
+                im.onerror = () => reject(new Error('Image load failed'));
+                im.src = objUrl;
+            });
+        } catch (_) {
+            return null;
+        }
+    }
+
     async function handleMasterCopyExecute(payload) {
         const preview = await computeMasterCopyPreview(payload);
         if (!preview.ok) return preview;
@@ -1978,7 +2121,19 @@
                     snapshot.created_files.push(filename);
                 }
 
-                const linesToWrite = (item.preview_boxes || []).map(b => b.raw);
+                let boxesToWrite = item.preview_boxes || [];
+                let alignedBoxCount = 0;
+                if (payload.smart_align && boxesToWrite.length > 0 && typeof window !== 'undefined' && window.YoloSmartAlign) {
+                    const mImg = await loadImageElementByStem(mStem);
+                    const tImg = await loadImageElementByStem(tStem);
+                    if (mImg && tImg) {
+                        const alignRes = window.YoloSmartAlign.alignBoxesFromImageElements(mImg, tImg, boxesToWrite);
+                        boxesToWrite = alignRes.boxes;
+                        alignedBoxCount = alignRes.alignedCount;
+                    }
+                }
+
+                const linesToWrite = boxesToWrite.map(b => b.raw);
                 const content = linesToWrite.join('\n') + (linesToWrite.length > 0 ? '\n' : '');
                 await outProvider.writeTextFile(filename, content);
 
@@ -1999,6 +2154,7 @@
                     master_stem: mStem,
                     status: 'success',
                     box_count: linesToWrite.length,
+                    aligned_box_count: alignedBoxCount,
                     has_aspect_diff: item.has_aspect_diff,
                     message: `已由參考照片 ${mStem} 建立 ${linesToWrite.length} 個標記框草稿（待人工確認）`
                 });
@@ -2876,7 +3032,17 @@
         }
     }
 
-    window.addEventListener('DOMContentLoaded', adaptWebModeUI);
+    function registerPwaServiceWorker() {
+        if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator &&
+            (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
+            navigator.serviceWorker.register('./sw.js').catch(() => {});
+        }
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+        registerPwaServiceWorker();
+        adaptWebModeUI();
+    });
 
     window.YoloWebEngine = {
         isActive() {

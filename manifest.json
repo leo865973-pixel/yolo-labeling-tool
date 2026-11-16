@@ -1,0 +1,18 @@
+{
+  "name": "AI 影像標記工具",
+  "short_name": "AI影像標記",
+  "description": "免安裝、100% 本機讀寫的 YOLO 影像標記與批次品檢工具",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#17232A",
+  "theme_color": "#17232A",
+  "icons": [
+    {
+      "src": "./static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
