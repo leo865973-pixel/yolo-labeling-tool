@@ -3116,18 +3116,36 @@
     // ========================================================================
     // 9. API 路由分派與 fetch 攔截層
     // ========================================================================
+    function resolveWebPickerStartIn(mode) {
+        const imgProv = activeState.imageProvider;
+        const dirHandle = (imgProv && !imgProv.isMemory && imgProv.dirHandle) ? imgProv.dirHandle : null;
+        if (mode === 'file' && imgProv && !imgProv.isMemory && sharedClassesState.handle) {
+            const isBoundToCur = Array.isArray(sharedClassesState.boundWorkspaces) &&
+                sharedClassesState.boundWorkspaces.includes(imgProv.virtualPath);
+            if (sharedClassesState.lockOverride || isBoundToCur) {
+                return sharedClassesState.handle;
+            }
+        }
+        return dirHandle;
+    }
+
     async function dispatchApiRequest(pathname, payload) {
         if (pathname === '/api/pick_path') {
             const mode = payload.mode || 'folder';
+            const startInHandle = resolveWebPickerStartIn(mode);
             if (mode === 'save_file') {
                 if (typeof window.showSaveFilePicker !== 'function') {
                     return { ok: false, error: '請使用桌面版 Microsoft Edge 或 Google Chrome 開啟此網頁以建立共用類別檔。' };
                 }
                 try {
-                    const fh = await window.showSaveFilePicker({
+                    const saveOpts = {
                         suggestedName: payload.suggested_name || 'classes.txt',
                         types: [{ description: 'YOLO Classes File', accept: { 'text/plain': ['.txt', '.names'] } }]
-                    });
+                    };
+                    if (startInHandle) {
+                        saveOpts.startIn = startInHandle;
+                    }
+                    const fh = await window.showSaveFilePicker(saveOpts);
                     if (typeof fh.requestPermission === 'function') {
                         await fh.requestPermission({ mode: 'readwrite' });
                     }
@@ -3152,10 +3170,14 @@
                     return { ok: false, error: '請使用桌面版 Microsoft Edge 或 Google Chrome 開啟此網頁以選擇檔案。' };
                 }
                 try {
-                    const [fh] = await window.showOpenFilePicker({
+                    const openOpts = {
                         multiple: false,
                         types: [{ description: 'Classes File', accept: { 'text/plain': ['.txt', '.names'] } }]
-                    });
+                    };
+                    if (startInHandle) {
+                        openOpts.startIn = startInHandle;
+                    }
+                    const [fh] = await window.showOpenFilePicker(openOpts);
                     if (typeof fh.requestPermission === 'function') {
                         await fh.requestPermission({ mode: 'readwrite' });
                     }
@@ -3177,7 +3199,11 @@
                     };
                 }
                 try {
-                    const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+                    const dirOpts = { mode: 'readwrite' };
+                    if (startInHandle) {
+                        dirOpts.startIn = startInHandle;
+                    }
+                    const dirHandle = await window.showDirectoryPicker(dirOpts);
                     const vPath = await registerDirectoryHandle(dirHandle);
                     await saveRecentHandleToIdb('last_image_dir', dirHandle);
                     return { ok: true, path: vPath, cancelled: false, folder_name: dirHandle.name };
