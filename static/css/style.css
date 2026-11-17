@@ -2398,6 +2398,27 @@ select:focus {
     vertical-align: middle;
 }
 
+.box-order-pill {
+    display: inline-block;
+    padding: 0 5px;
+    border-radius: var(--radius-xs);
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-light);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--type-caption);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    margin-right: 6px;
+    vertical-align: baseline;
+}
+
+.box-row-item.selected .box-order-pill {
+    background: var(--brand-orange);
+    color: var(--brand-ink);
+    border-color: var(--brand-orange);
+}
+
 .box-inline-class-select {
     max-width: 132px;
     min-height: 28px;

@@ -1030,13 +1030,27 @@ async function scanCurrentWorkspace(options = {}) {
             reviewQueue = reviewQueue.filter(st => data.items.some(i => i.stem === st));
         }
 
-        if (activeStem && data.items.some(i => i.stem === activeStem)) {
-            // keep activeStem
-        } else if (sessionInfo.last_active_stem && data.items.some(i => i.stem === sessionInfo.last_active_stem)) {
-            activeStem = sessionInfo.last_active_stem;
+        // 選取預設檢視照片：每次載入照片（非保持當前步驟刷新）一律從左側清單第一張開始
+        if (!options.keepStep) {
+            currentFilter = 'all';
+            const searchEl = document.getElementById('searchInput');
+            if (searchEl) searchEl.value = '';
+            document.querySelectorAll('#allScopeFilterChips .f-chip').forEach(button => {
+                button.classList.toggle('active', button.dataset.filter === 'all');
+                button.setAttribute('aria-pressed', String(button.dataset.filter === 'all'));
+            });
+            lastVirtualScrolledStem = null;
+            const fileListEl = document.getElementById('studioFileList');
+            if (fileListEl) fileListEl.scrollTop = 0;
+            const firstItem = (data.items || []).find(i => i.has_image) || (data.items || [])[0];
+            activeStem = firstItem ? firstItem.stem : null;
+            selectedBoxIndex = -1;
+        } else if (activeStem && data.items.some(i => i.stem === activeStem)) {
+            // keep activeStem when refreshing current view
         } else {
-            const firstPhoto = data.items.find(i => i.has_image);
-            activeStem = firstPhoto ? firstPhoto.stem : null;
+            const firstItem = (data.items || []).find(i => i.has_image) || (data.items || [])[0];
+            activeStem = firstItem ? firstItem.stem : null;
+            selectedBoxIndex = -1;
         }
 
         for (const stem of copySelectedStems) {
@@ -2640,7 +2654,8 @@ function renderInspectorAndCanvas() {
         boxesEl.innerHTML = `<div class="muted-text">沒有標記框（可點上方「＋ 新增框 (W)」在照片上拉框）。</div>`;
     } else {
         boxesEl.innerHTML = item.boxes.map((b, idx) => {
-            const color = CLASS_COLORS[b.class_id % CLASS_COLORS.length];
+            const cidIdx = ((parseInt(b.class_id, 10) || 0) % CLASS_COLORS.length + CLASS_COLORS.length) % CLASS_COLORS.length;
+            const color = CLASS_COLORS[cidIdx];
             const isSel = idx === selectedBoxIndex;
             const inlineClsSelect = isSel
                 ? `<select class="form-select-sm box-inline-class-select" aria-label="變更標記框類別" onclick="event.stopPropagation()" onchange="changeSelectedBoxClass(${idx}, this.value)">
@@ -2653,11 +2668,12 @@ function renderInspectorAndCanvas() {
                     <div class="box-row-main">
                         <span>
                             <span class="box-color-dot" style="background:${color};"></span>
-                            ${idx + 1} · ${escapeHtml(b.class_name)}
+                            <span class="box-order-pill">#${idx + 1}</span>
+                            [${b.class_id}] ${escapeHtml(b.class_name)}
                         </span>
                         ${inlineClsSelect}
                     </div>
-                    ${isSel ? `<div class="box-properties">編號 ${b.class_id} · 寬 ${(b.w * 100).toFixed(1)}% × 高 ${(b.h * 100).toFixed(1)}%</div>` : ''}
+                    ${isSel ? `<div class="box-properties">寬 ${(b.w * 100).toFixed(1)}% × 高 ${(b.h * 100).toFixed(1)}%</div>` : ''}
                 </div>
             `;
         }).join('');
@@ -3486,8 +3502,8 @@ function drawBoxesOnContext(ctx, boxes, W, H, highlightIdx, options = {}) {
         ctx.fillRect(bx, by, bw, bh);
         ctx.restore();
 
-        // 標籤文字背景
-        const labelStr = `#${idx + 1} ${b.class_name}`;
+        // 標籤文字背景（直接顯示 YOLO 類別編號 + 名稱，避免框序與類別 ID 混淆）
+        const labelStr = `[${b.class_id}] ${b.class_name}`;
         ctx.font = compact
             ? 'bold 12px "Microsoft JhengHei", sans-serif'
             : 'bold 17px "Microsoft JhengHei", sans-serif';
@@ -3500,6 +3516,30 @@ function drawBoxesOnContext(ctx, boxes, W, H, highlightIdx, options = {}) {
         ctx.fillRect(labelX, labelY - labelHeight, textW, labelHeight);
         ctx.fillStyle = isSel ? '#17232A' : '#FFFFFF';
         ctx.fillText(labelStr, labelX + (compact ? 4 : 5), labelY - (compact ? 5 : 5), Math.max(1, W - 10));
+
+        // 框內右下角獨立序號角標 (#1, #2...)，方便區分同類別多框次序
+        const orderStr = `#${idx + 1}`;
+        ctx.save();
+        ctx.font = compact
+            ? 'bold 11px ui-monospace, Consolas, sans-serif'
+            : 'bold 12px ui-monospace, Consolas, sans-serif';
+        const orderPadX = compact ? 6 : 8;
+        const badgeH = compact ? 16 : 19;
+        const badgeW = Math.ceil(ctx.measureText(orderStr).width) + orderPadX;
+        const insetPx = isSel ? 5 : 2;
+        const fitsInside = bw >= badgeW + insetPx * 2 && bh >= badgeH + insetPx * 2;
+        const badgeX = fitsInside
+            ? (bx + bw - badgeW - insetPx)
+            : Math.max(0, Math.min(bx + bw - badgeW, W - badgeW));
+        const badgeY = fitsInside
+            ? (by + bh - badgeH - insetPx)
+            : Math.min(H - badgeH, by + bh + 2);
+        ctx.fillStyle = isSel ? 'rgba(240, 138, 76, 0.94)' : 'rgba(23, 35, 42, 0.78)';
+        ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
+        ctx.fillStyle = isSel ? '#17232A' : '#FFFFFF';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(orderStr, badgeX + orderPadX / 2, badgeY + badgeH / 2 + 0.5);
+        ctx.restore();
 
         // 選取框的 8 點縮放控制點（四角 + 上下左右四邊中點）
         if (isSel) {
