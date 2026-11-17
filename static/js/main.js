@@ -77,6 +77,7 @@ let canvasRenderState = null;
 let selectedBoxIndex = -1;
 let dragAction = null;
 let isDrawBoxMode = false;
+let isShiftHideOrderKeyDown = false;
 let isMagnifierLoupeEnabled = true;
 let defaultDrawClassId = 0;
 let canvasHoverPos = null;
@@ -145,6 +146,9 @@ async function switchStep(stepName) {
         if (!flushed) return;
     }
     hideCopyPhotoHoverPreview();
+    if (stepName !== 'review') {
+        setShiftHideOrderKeyDown(false, false);
+    }
     currentStep = stepName;
 
     document.querySelectorAll('.workspace-nav-btn').forEach(btn => {
@@ -3016,6 +3020,19 @@ function selectBoxFromList(idx) {
     }
 }
 
+function cycleSelectedBoxOnCanvas() {
+    const item = scanData?.items?.find(i => i.stem === activeStem);
+    if (!item || !Array.isArray(item.boxes) || item.boxes.length === 0) return false;
+    if (selectedBoxIndex < 0) return false;
+    const total = item.boxes.length;
+    const curIdx = Math.min(Math.max(selectedBoxIndex, 0), total - 1);
+    const nextIdx = (curIdx + 1) % total;
+    selectBoxFromList(nextIdx);
+    const activeRow = document.querySelector?.('#itemBoxesList .box-row-item.selected');
+    activeRow?.scrollIntoView?.({ block: 'nearest' });
+    return true;
+}
+
 // ============================================================================
 // 畫布繪製與直接拖曳微調標記框 (保持照片正確比例，不拉伸變形)
 // ============================================================================
@@ -3381,7 +3398,7 @@ function redrawCanvases() {
     // 繪製標記框
     const showBoxes = true;
     if (showBoxes && item.boxes && item.boxes.length > 0) {
-        drawBoxesOnContext(ctx, item.boxes, drawW, drawH, selectedBoxIndex);
+        drawBoxesOnContext(ctx, item.boxes, drawW, drawH, selectedBoxIndex, getTargetCanvasOrderHideOptions());
     }
 
     // 新增標記框模式的十字輔助線與即時拉框預覽
@@ -3480,8 +3497,35 @@ function getBoxResizeHandles(bx, by, bw, bh) {
     return handles;
 }
 
+function setShiftHideOrderKeyDown(active, shouldRedraw = true) {
+    const next = Boolean(active);
+    if (isShiftHideOrderKeyDown === next) return;
+    isShiftHideOrderKeyDown = next;
+    if (shouldRedraw && currentStep === 'review' && scanData?.ok) {
+        redrawCanvases();
+    }
+}
+
+function getTargetCanvasOrderHideOptions() {
+    if (isDrawBoxMode || (dragAction && dragAction.mode === 'create')) {
+        return { hideAllOrder: true, hideOrderIdx: -1 };
+    }
+    if (dragAction && (dragAction.mode === 'resize' || dragAction.mode === 'move') && Number.isInteger(dragAction.boxIdx)) {
+        return { hideAllOrder: false, hideOrderIdx: dragAction.boxIdx };
+    }
+    if (isShiftHideOrderKeyDown) {
+        if (selectedBoxIndex >= 0) {
+            return { hideAllOrder: false, hideOrderIdx: selectedBoxIndex };
+        }
+        return { hideAllOrder: true, hideOrderIdx: -1 };
+    }
+    return { hideAllOrder: false, hideOrderIdx: -1 };
+}
+
 function drawBoxesOnContext(ctx, boxes, W, H, highlightIdx, options = {}) {
     const compact = Boolean(options?.compact);
+    const hideAllOrder = Boolean(options?.hideAllOrder);
+    const hideOrderIdx = Number.isInteger(options?.hideOrderIdx) ? options.hideOrderIdx : -1;
     boxes.forEach((b, idx) => {
         if (!b || ![b.xc, b.yc, b.w, b.h].every(Number.isFinite)) return;
         const bw = b.w * W;
@@ -3517,29 +3561,31 @@ function drawBoxesOnContext(ctx, boxes, W, H, highlightIdx, options = {}) {
         ctx.fillStyle = isSel ? '#17232A' : '#FFFFFF';
         ctx.fillText(labelStr, labelX + (compact ? 4 : 5), labelY - (compact ? 5 : 5), Math.max(1, W - 10));
 
-        // 框內右下角獨立序號角標 (#1, #2...)，方便區分同類別多框次序
-        const orderStr = `#${idx + 1}`;
-        ctx.save();
-        ctx.font = compact
-            ? 'bold 11px ui-monospace, Consolas, sans-serif'
-            : 'bold 12px ui-monospace, Consolas, sans-serif';
-        const orderPadX = compact ? 6 : 8;
-        const badgeH = compact ? 16 : 19;
-        const badgeW = Math.ceil(ctx.measureText(orderStr).width) + orderPadX;
-        const insetPx = isSel ? 5 : 2;
-        const fitsInside = bw >= badgeW + insetPx * 2 && bh >= badgeH + insetPx * 2;
-        const badgeX = fitsInside
-            ? (bx + bw - badgeW - insetPx)
-            : Math.max(0, Math.min(bx + bw - badgeW, W - badgeW));
-        const badgeY = fitsInside
-            ? (by + bh - badgeH - insetPx)
-            : Math.min(H - badgeH, by + bh + 2);
-        ctx.fillStyle = isSel ? 'rgba(240, 138, 76, 0.94)' : 'rgba(23, 35, 42, 0.78)';
-        ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
-        ctx.fillStyle = isSel ? '#17232A' : '#FFFFFF';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(orderStr, badgeX + orderPadX / 2, badgeY + badgeH / 2 + 0.5);
-        ctx.restore();
+        // 框內右下角獨立序號角標 (#1, #2...)，方便區分同類別多框次序；滑鼠調整大小或按住 Shift 時暫時隱藏
+        if (!hideAllOrder && idx !== hideOrderIdx) {
+            const orderStr = `#${idx + 1}`;
+            ctx.save();
+            ctx.font = compact
+                ? 'bold 11px ui-monospace, Consolas, sans-serif'
+                : 'bold 12px ui-monospace, Consolas, sans-serif';
+            const orderPadX = compact ? 6 : 8;
+            const badgeH = compact ? 16 : 19;
+            const badgeW = Math.ceil(ctx.measureText(orderStr).width) + orderPadX;
+            const insetPx = isSel ? 5 : 2;
+            const fitsInside = bw >= badgeW + insetPx * 2 && bh >= badgeH + insetPx * 2;
+            const badgeX = fitsInside
+                ? (bx + bw - badgeW - insetPx)
+                : Math.max(0, Math.min(bx + bw - badgeW, W - badgeW));
+            const badgeY = fitsInside
+                ? (by + bh - badgeH - insetPx)
+                : Math.min(H - badgeH, by + bh + 2);
+            ctx.fillStyle = isSel ? 'rgba(240, 138, 76, 0.94)' : 'rgba(23, 35, 42, 0.78)';
+            ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
+            ctx.fillStyle = isSel ? '#17232A' : '#FFFFFF';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(orderStr, badgeX + orderPadX / 2, badgeY + badgeH / 2 + 0.5);
+            ctx.restore();
+        }
 
         // 選取框的 8 點縮放控制點（四角 + 上下左右四邊中點）
         if (isSel) {
@@ -3678,6 +3724,7 @@ function initCanvasInteraction() {
                         preDragSnap: snapshotItemForUndo(item),
                         modified: false
                     };
+                    redrawCanvases();
                     return;
                 }
             }
@@ -3693,6 +3740,7 @@ function initCanvasInteraction() {
                     wasAlreadySelected: true,
                     modified: false
                 };
+                redrawCanvases();
                 return;
             }
         }
@@ -3939,6 +3987,8 @@ function initCanvasInteraction() {
             // 在放大狀態下若單擊已選取的標記框且未拖動，可取消選取以便隨時拖移照片
             selectedBoxIndex = -1;
             renderInspectorAndCanvas();
+        } else if (doneDrag.mode === 'resize' || doneDrag.mode === 'move') {
+            redrawCanvases();
         }
     });
 }
@@ -4549,6 +4599,26 @@ function initKeyboardShortcuts() {
             return;
         }
 
+        // 按住 Shift 暫時隱藏右側檢視區 #序號 角標，直到放開 Shift 按鍵
+        if (e.key === 'Shift') {
+            if (!e.repeat && currentStep === 'review' && !isEditableTarget && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                setShiftHideOrderKeyDown(true);
+            }
+            return;
+        }
+
+        // 已選取標記框時，按 Tab 依標記順序循環切換下一個標記框（不含 Shift+Tab）
+        if (e.key === 'Tab' && !e.shiftKey && currentStep === 'review' && !isEditableTarget && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            const curItem = scanData?.items?.find(i => i.stem === activeStem);
+            if (selectedBoxIndex >= 0 && curItem?.boxes?.length > 0 && !dragAction) {
+                e.preventDefault();
+                if (!e.repeat) {
+                    cycleSelectedBoxOnCanvas();
+                }
+                return;
+            }
+        }
+
         if (e.repeat) return;
         if (e.ctrlKey || e.metaKey || e.altKey) return;
 
@@ -4571,6 +4641,9 @@ function initKeyboardShortcuts() {
 
         // 以下快捷鍵僅在「3. 檢查與微調」頁面生效
         if (currentStep !== 'review') return;
+        if (e.shiftKey && !isShiftHideOrderKeyDown) {
+            setShiftHideOrderKeyDown(true);
+        }
 
         // 方向鍵微調已選取標記框位置（一般 1px；按住 Shift 每次 10px）
         if (selectedBoxIndex >= 0 && !e.target?.classList?.contains('photo-list-resize')) {
@@ -4640,6 +4713,22 @@ function initKeyboardShortcuts() {
             }
         }
     });
+
+    window.addEventListener('keyup', (e) => {
+        if (isShiftHideOrderKeyDown && !e.shiftKey) {
+            setShiftHideOrderKeyDown(false);
+        }
+    });
+
+    window.addEventListener('blur', () => {
+        setShiftHideOrderKeyDown(false);
+    });
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            setShiftHideOrderKeyDown(false);
+        }
+    });
 }
 
 // ============================================================================
@@ -4677,6 +4766,7 @@ function handleModalKey(event) {
 
 function openModal(modalId) {
     hideCopyPhotoHoverPreview();
+    setShiftHideOrderKeyDown(false);
     if ((modalId === 'remapModal' || modalId === 'trainCheckModal') && dirtyCanvasStem) {
         flushUnsavedCanvasDraftIfNeeded().then(ok => {
             if (ok) openModal(modalId);
