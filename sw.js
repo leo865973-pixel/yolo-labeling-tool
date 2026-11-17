@@ -2,12 +2,14 @@
  * AI 影像標記工具 — PWA Service Worker (離線快取與秒開加速)
  * 支援首次開啟後將所有前端核心資源快取於瀏覽器，即使公司產線處於斷網環境仍可 100% 離線運作。
  */
-const CACHE_NAME = 'yolo-labeling-pwa-v2';
+const CACHE_NAME = 'yolo-labeling-pwa-v3';
 const PRECACHE_ASSETS = [
     './',
     './index.html',
     './manifest.json',
-    './static/icon.svg',
+    './static/cmc_logo.png',
+    './static/cmc_favicon.png',
+    './static/cmc_icon_512.png',
     './static/css/style.css',
     './static/js/shared_rules.js',
     './static/js/web_fs_engine.js',

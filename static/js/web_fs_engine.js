@@ -473,13 +473,62 @@
             return meta;
         }
 
-        async getMetaSubdir(create = true) {
-            return await this.dirHandle.getDirectoryHandle('_yolo_batch_workspace', { create });
+        async resolveWorkspaceStorageKey() {
+            if (this._wsKey) return this._wsKey;
+            if (this._wsKeyPromise) return await this._wsKeyPromise;
+            this._wsKeyPromise = (async () => {
+                let registry = await loadRecentHandleFromIdb('ws_registry');
+                if (!Array.isArray(registry)) registry = [];
+                for (const entry of registry) {
+                    if (!entry || !entry.key || !entry.handle) continue;
+                    try {
+                        if (entry.name === this.name && typeof this.dirHandle.isSameEntry === 'function' &&
+                            await this.dirHandle.isSameEntry(entry.handle)) {
+                            this._wsKey = entry.key;
+                            return entry.key;
+                        }
+                    } catch (_) {}
+                }
+                const newKey = `ws_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+                registry.push({ key: newKey, name: this.name, handle: this.dirHandle });
+                await saveRecentHandleToIdb('ws_registry', registry);
+                this._wsKey = newKey;
+                return newKey;
+            })();
+            try {
+                return await this._wsKeyPromise;
+            } finally {
+                this._wsKeyPromise = null;
+            }
+        }
+
+        async hasLegacyWorkspaceDir() {
+            try {
+                await this.dirHandle.getDirectoryHandle('_yolo_batch_workspace', { create: false });
+                return true;
+            } catch (_) {
+                return false;
+            }
+        }
+
+        async removeLegacyWorkspaceDir() {
+            try {
+                await this.dirHandle.removeEntry('_yolo_batch_workspace', { recursive: true });
+                return true;
+            } catch (_) {
+                return false;
+            }
         }
 
         async readWorkspaceJson(relName, fallbackObj) {
             try {
-                const metaDir = await this.getMetaSubdir(false);
+                const wsKey = await this.resolveWorkspaceStorageKey();
+                const saved = await loadRecentHandleFromIdb(`ws_state::${wsKey}::${relName}`);
+                if (saved && typeof saved === 'object') {
+                    return { ...fallbackObj, ...saved };
+                }
+                // 唯讀相容舊版遺留於資料夾內的 _yolo_batch_workspace，不再於資料夾內寫入或建立
+                const metaDir = await this.dirHandle.getDirectoryHandle('_yolo_batch_workspace', { create: false });
                 const fh = await metaDir.getFileHandle(relName, { create: false });
                 const file = await fh.getFile();
                 const txt = await file.text();
@@ -491,34 +540,32 @@
 
         async writeWorkspaceJson(relName, dataObj) {
             try {
-                const metaDir = await this.getMetaSubdir(true);
-                const fh = await metaDir.getFileHandle(relName, { create: true });
-                const writable = await fh.createWritable();
-                await writable.write(JSON.stringify(dataObj, null, 2));
-                await writable.close();
+                const wsKey = await this.resolveWorkspaceStorageKey();
+                await saveRecentHandleToIdb(`ws_state::${wsKey}::${relName}`, dataObj);
             } catch (_) {}
         }
 
         async writeBackupSnapshot(backupId, snapshotObj) {
             try {
-                const metaDir = await this.getMetaSubdir(true);
-                const backupsDir = await metaDir.getDirectoryHandle('backups', { create: true });
-                const bDir = await backupsDir.getDirectoryHandle(backupId, { create: true });
-                const fh = await bDir.getFileHandle('manifest.json', { create: true });
-                const writable = await fh.createWritable();
-                await writable.write(JSON.stringify(snapshotObj, null, 2));
-                await writable.close();
+                const wsKey = await this.resolveWorkspaceStorageKey();
+                await saveRecentHandleToIdb(`ws_backup::${wsKey}::${backupId}`, snapshotObj);
+                let index = await loadRecentHandleFromIdb(`ws_backup_index::${wsKey}`);
+                if (!Array.isArray(index)) index = [];
+                if (!index.includes(backupId)) index.push(backupId);
+                index.sort();
+                while (index.length > 20) {
+                    const evicted = index.shift();
+                    if (evicted) await deleteRecentHandleFromIdb(`ws_backup::${wsKey}::${evicted}`);
+                }
+                await saveRecentHandleToIdb(`ws_backup_index::${wsKey}`, index);
             } catch (_) {}
         }
 
         async readBackupSnapshot(backupId) {
             try {
-                const metaDir = await this.getMetaSubdir(false);
-                const backupsDir = await metaDir.getDirectoryHandle('backups', { create: false });
-                const bDir = await backupsDir.getDirectoryHandle(backupId, { create: false });
-                const fh = await bDir.getFileHandle('manifest.json', { create: false });
-                const file = await fh.getFile();
-                return JSON.parse(await file.text());
+                const wsKey = await this.resolveWorkspaceStorageKey();
+                const saved = await loadRecentHandleFromIdb(`ws_backup::${wsKey}::${backupId}`);
+                return saved || null;
             } catch (_) {
                 return null;
             }
@@ -526,23 +573,24 @@
 
         async removeBackupSnapshot(backupId) {
             try {
-                const metaDir = await this.getMetaSubdir(false);
-                const backupsDir = await metaDir.getDirectoryHandle('backups', { create: false });
-                await backupsDir.removeEntry(backupId, { recursive: true });
+                const wsKey = await this.resolveWorkspaceStorageKey();
+                await deleteRecentHandleFromIdb(`ws_backup::${wsKey}::${backupId}`);
+                let index = await loadRecentHandleFromIdb(`ws_backup_index::${wsKey}`);
+                if (Array.isArray(index)) {
+                    index = index.filter(id => id !== backupId);
+                    await saveRecentHandleToIdb(`ws_backup_index::${wsKey}`, index);
+                }
             } catch (_) {}
         }
 
         async listBackupIds() {
-            const ids = [];
             try {
-                const metaDir = await this.getMetaSubdir(false);
-                const backupsDir = await metaDir.getDirectoryHandle('backups', { create: false });
-                for await (const [name, handle] of backupsDir.entries()) {
-                    if (handle.kind === 'directory') ids.push(name);
-                }
-            } catch (_) {}
-            ids.sort();
-            return ids;
+                const wsKey = await this.resolveWorkspaceStorageKey();
+                const index = await loadRecentHandleFromIdb(`ws_backup_index::${wsKey}`);
+                return Array.isArray(index) ? [...index].sort() : [];
+            } catch (_) {
+                return [];
+            }
         }
     }
 
@@ -619,6 +667,10 @@
         async listBackupIds() {
             return Array.from(this.backups.keys()).sort();
         }
+
+        async hasLegacyWorkspaceDir() { return false; }
+
+        async removeLegacyWorkspaceDir() { return false; }
     }
 
     // 產生與 app.py ensure_sample_dataset() 1:1 相同的內建範例資料集
@@ -1043,7 +1095,7 @@
                 code: 'MISSING_CLASSES_FILE',
                 blocking: false,
                 reason: '尚未找到 classes.txt 類別定義檔',
-                suggestion: '仍可檢視標記框與編號，但無法顯示類別名稱與驗證編號上限；可於進階設定指定類別檔。'
+                suggestion: ''
             });
             return result;
         }
@@ -1056,7 +1108,7 @@
                 code: 'CLASSES_READ_ERR',
                 blocking: true,
                 reason: `讀取 classes.txt 失敗: ${fileData.error}`,
-                suggestion: '請將 classes.txt 另存為 UTF-8 格式後重新載入。'
+                suggestion: ''
             });
             return result;
         }
@@ -1068,7 +1120,7 @@
                 code: 'CLASSES_ENCODING_WARN',
                 blocking: false,
                 reason: 'classes.txt 編碼為 ANSI/Big5 而非 UTF-8',
-                suggestion: '建議於類別修正儲存時自動轉為標準 UTF-8 編碼。'
+                suggestion: ''
             });
         }
 
@@ -1087,7 +1139,7 @@
                     code: 'CLASSES_EMPTY_LINE',
                     blocking: true,
                     reason: `classes.txt 第 ${idx + 1} 行（對應 ID ${idx}）為空白行`,
-                    suggestion: '類別檔中間的空白行會導致後續類別編號順延錯位，請先透過「類別修正」清理。'
+                    suggestion: '會導致後續類別編號錯位'
                 });
             } else if (Object.prototype.hasOwnProperty.call(seenNames, name)) {
                 if (result.status !== 'error') result.status = 'warning';
@@ -1096,7 +1148,7 @@
                     code: 'CLASSES_DUP_NAME',
                     blocking: false,
                     reason: `類別名稱「${name}」重複出現於 ID ${seenNames[name]} 與 ID ${idx}`,
-                    suggestion: '可使用上方「類別修正」工具將重複的類別編號合併。'
+                    suggestion: ''
                 });
             } else {
                 seenNames[name] = idx;
@@ -1112,7 +1164,7 @@
                 code: 'CLASSES_EMPTY',
                 blocking: false,
                 reason: 'classes.txt 內容為空（尚無任何類別定義）',
-                suggestion: '請確認是否選對類別檔，或於畫布新增標記框時建立新類別。'
+                suggestion: ''
             });
         }
 
@@ -1132,7 +1184,7 @@
                 code: 'EMPTY_LABEL',
                 blocking: false,
                 reason: '標記檔存在但內容為空（0 個標記框）',
-                suggestion: '若此照片確實沒有目標物件（背景圖），可於檢查頁點擊「確認為無物件照片」；若為漏標記則可套用參考照片。'
+                suggestion: ''
             });
             return {
                 boxes: [],
@@ -1166,7 +1218,7 @@
                     blocking: true,
                     line: lineNum,
                     reason: `第 ${lineNum} 行欄位數量錯誤：應為 5 欄，實際為 ${parts.length} 欄`,
-                    suggestion: '請於檢查與微調畫布重新調整並儲存此標記檔。'
+                    suggestion: ''
                 });
                 return;
             }
@@ -1179,7 +1231,7 @@
                     blocking: true,
                     line: lineNum,
                     reason: `第 ${lineNum} 行類別編號 \`${parts[0]}\` 不是有效整數`,
-                    suggestion: 'YOLO 第一欄必須為非負整數類別編號。'
+                    suggestion: ''
                 });
                 return;
             }
@@ -1197,7 +1249,7 @@
                     blocking: true,
                     line: lineNum,
                     reason: `第 ${lineNum} 行座標無法解析為數值`,
-                    suggestion: '請檢查標記檔座標欄位是否包含非數字字元。'
+                    suggestion: ''
                 });
                 return;
             }
@@ -1209,7 +1261,7 @@
                     blocking: true,
                     line: lineNum,
                     reason: `第 ${lineNum} 行座標含 NaN 或 Infinity`,
-                    suggestion: '請改為有限數值。'
+                    suggestion: ''
                 });
                 return;
             }
@@ -1225,7 +1277,7 @@
                     blocking: true,
                     line: lineNum,
                     reason: `第 ${lineNum} 行類別編號 \`${classId}\` 為負數`,
-                    suggestion: '請使用「類別修正」工具將此編號改為有效類別。'
+                    suggestion: ''
                 });
             } else if (hasClassesFile && !hasClassInMap) {
                 hasUndefClass = true;
@@ -1236,7 +1288,7 @@
                     blocking: true,
                     line: lineNum,
                     reason: `第 ${lineNum} 行類別編號 \`${classId}\` 不在 classes.txt 定義範圍內 (0~${maxCid})`,
-                    suggestion: '請使用上方「類別修正」工具重新對應此類別編號，或確認是否選錯 classes.txt。'
+                    suggestion: ''
                 });
             }
 
@@ -1248,7 +1300,7 @@
                     blocking: true,
                     line: lineNum,
                     reason: `第 ${lineNum} 行 (${className}) 標記框寬度或高度為 0 或負數`,
-                    suggestion: '請於檢查頁選取此框按 Delete 刪除，或拉動控制點修正尺寸。'
+                    suggestion: ''
                 });
             } else if (w < YOLO_THRESHOLDS.tiny_box_min_dim || h < YOLO_THRESHOLDS.tiny_box_min_dim) {
                 hasCoordErr = true;
@@ -1257,8 +1309,8 @@
                     code: 'TINY_BOX',
                     blocking: false,
                     line: lineNum,
-                    reason: `第 ${lineNum} 行 (${className}) 標記框尺寸極小 (${w.toFixed(4)}×${h.toFixed(4)})，疑似滑鼠誤點`,
-                    suggestion: '請於畫布檢查是否為誤點產生的極小框，必要時按 Delete 刪除。'
+                    reason: `第 ${lineNum} 行 (${className}) 標記框尺寸極小 (${w.toFixed(4)}×${h.toFixed(4)})`,
+                    suggestion: ''
                 });
             } else if (w > YOLO_THRESHOLDS.oversize_box_max_dim || h > YOLO_THRESHOLDS.oversize_box_max_dim) {
                 hasCoordErr = true;
@@ -1268,7 +1320,7 @@
                     blocking: true,
                     line: lineNum,
                     reason: `第 ${lineNum} 行 (${className}) 標記框寬高超過 1.0 (${w.toFixed(4)}×${h.toFixed(4)})`,
-                    suggestion: '標記框超出照片範圍，請重新拖曳調整進照片內。'
+                    suggestion: ''
                 });
             }
 
@@ -1286,7 +1338,7 @@
                     blocking: true,
                     line: lineNum,
                     reason: `第 ${lineNum} 行 (${className}) 中心點超出 [0, 1] 範圍 (x=${xc.toFixed(3)}, y=${yc.toFixed(3)})`,
-                    suggestion: '請於畫布將標記框拖回影像範圍內或刪除。'
+                    suggestion: ''
                 });
             } else if (xmin < -tol || ymin < -tol || xmax > 1.0 + tol || ymax > 1.0 + tol) {
                 hasCoordErr = true;
@@ -1296,7 +1348,7 @@
                     blocking: false,
                     line: lineNum,
                     reason: `第 ${lineNum} 行 (${className}) 標記框邊緣略微超出影像邊界`,
-                    suggestion: '可在檢查與微調畫布直接微調框邊界，確認即可自動裁切至 [0, 1]。'
+                    suggestion: ''
                 });
             }
 
@@ -1331,7 +1383,7 @@
                         blocking: false,
                         line: boxes[j].line,
                         reason: `第 ${boxes[i].line} 行與第 ${boxes[j].line} 行框高度重疊（${clsDesc}，重疊率 ${Math.round(iou * 100)}%）`,
-                        suggestion: '請於畫布點選多餘的重疊框，按 Delete 鍵即可刪除。'
+                        suggestion: ''
                     });
                 }
             }
@@ -1409,7 +1461,64 @@
         }));
     }
 
-    async function performFullScan() {
+    async function inspectWebFolderClassesSync(labelProvider, sharedActive, localExistsFlag, activeClasses) {
+        let classesInFolderExists = false;
+        let classesInFolderSynced = false;
+        if (activeClasses.length > 0) {
+            classesInFolderExists = await labelProvider.fileExists('classes.txt');
+            if (!sharedActive && localExistsFlag) {
+                classesInFolderExists = true;
+                classesInFolderSynced = true;
+            } else if (classesInFolderExists) {
+                try {
+                    const localTxt = await labelProvider.readTextFile('classes.txt');
+                    const lines = localTxt.text.split(/\r?\n/);
+                    while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
+                    const hasBlankMid = lines.some(l => l.trim() === '');
+                    const names = lines.map(l => l.trim());
+                    classesInFolderSynced = !hasBlankMid &&
+                        names.length === activeClasses.length &&
+                        names.every((n, i) => n === activeClasses[i]);
+                } catch (_) {
+                    classesInFolderSynced = false;
+                }
+            }
+        }
+        return {
+            classesInFolderExists,
+            classesInFolderSynced,
+            needsClassesSync: Boolean(activeClasses.length > 0 && !classesInFolderSynced)
+        };
+    }
+
+    async function syncWebLocalClassesMirrorIfShared(labelProvider, classesInfo, classNames) {
+        if (!labelProvider || labelProvider.isMemory) return false;
+        if (!classesInfo || !classesInfo.is_shared_external || classesInfo.needs_permission || classesInfo.missing_file) {
+            return false;
+        }
+        if (sharedClassesState.lockOverride) {
+            const imgProv = activeState.imageProvider;
+            const curVPath = imgProv ? imgProv.virtualPath : '';
+            const explicitlyBound = Array.isArray(sharedClassesState.boundWorkspaces) &&
+                sharedClassesState.boundWorkspaces.includes(curVPath);
+            if (!explicitlyBound && await labelProvider.fileExists('classes.txt')) {
+                return false;
+            }
+        }
+        const cleaned = Array.isArray(classNames) ? classNames.map(c => String(c || '').trim()).filter(Boolean) : [];
+        if (cleaned.length === 0) return false;
+        const targetText = cleaned.join('\n') + '\n';
+        if (await labelProvider.fileExists('classes.txt')) {
+            try {
+                const cur = await labelProvider.readTextFile('classes.txt');
+                if (cur.text === targetText) return false;
+            } catch (_) {}
+        }
+        await labelProvider.writeTextFile('classes.txt', targetText);
+        return true;
+    }
+
+    async function performFullScan(options = {}) {
         const imageProvider = activeState.imageProvider;
         const labelProvider = activeState.labelProvider || imageProvider;
         if (!imageProvider) {
@@ -1421,6 +1530,10 @@
         activeState.classesPath = classesInfo.path;
         const classMap = classesInfo.class_map;
         const hasClassesFile = classesInfo.exists && Object.keys(classMap).length > 0;
+        if (!options.skipClassesMirror && hasClassesFile) {
+            const orderedCls = classesInfo.classes.map(c => c.name);
+            await syncWebLocalClassesMirrorIfShared(labelProvider, classesInfo, orderedCls);
+        }
         const classesBasename = (classesInfo.filename || 'classes.txt').toLowerCase();
 
         const imgEntries = await imageProvider.listFiles();
@@ -1528,7 +1641,7 @@
                     code: 'DUPLICATE_STEM',
                     blocking: true,
                     reason: `同主檔名存在多個不同副檔名照片：${imgList.join(', ')}`,
-                    suggestion: 'YOLO 標記檔依主檔名配對，請於資料夾移除或重新命名重複照片。'
+                    suggestion: '影響 YOLO 主檔名配對'
                 }];
                 registerIssueGroup('DUPLICATE_STEM', '重複主檔名衝突', 'error', 'studio_error', '檢視衝突檔案', stem);
                 items.push({
@@ -1580,7 +1693,7 @@
                     code: 'ORPHAN_LABEL',
                     blocking: false,
                     reason: `找不到與 \`${lblName}\` 同主檔名的照片`,
-                    suggestion: '請確認對應照片是否遺漏，或此為多餘的舊標記檔。'
+                    suggestion: ''
                 }, ...parsed.issues];
                 registerIssueGroup('ORPHAN_LABEL', '找不到對應照片的孤立標記檔', 'warning', 'studio_orphan', '檢視孤立標記檔', stem);
                 const hasErr = issues.some(i => i.blocking);
@@ -1640,7 +1753,7 @@
                     code: 'MISSING_LABEL',
                     blocking: false,
                     reason: '尚未建立標記檔 (.txt)',
-                    suggestion: '可於「2. 批次套用」選取參考照片建立標記草稿，或於檢查頁確認為無物件照片。'
+                    suggestion: ''
                 }];
                 registerIssueGroup('MISSING_LABEL', '缺少標記檔（尚未標記的照片）', 'info', 'batch_apply', '前往批次套用', stem);
 
@@ -1656,7 +1769,7 @@
                         code: 'IMAGE_CORRUPT',
                         blocking: true,
                         reason: imgMeta.read_error,
-                        suggestion: '照片檔案可能損毀，請檢查原始檔案。'
+                        suggestion: ''
                     });
                     registerIssueGroup('IMAGE_CORRUPT', '照片無法讀取或損毀', 'error', 'studio_error', '檢視損毀檔案', stem);
                 }
@@ -1728,7 +1841,7 @@
                     code: 'IMAGE_CORRUPT',
                     blocking: true,
                     reason: imgMeta.read_error,
-                    suggestion: '照片檔案可能損毀，請檢查原始檔案。'
+                    suggestion: ''
                 });
             }
             if (imgMeta.has_exif_orientation) {
@@ -1737,7 +1850,7 @@
                     code: 'EXIF_ROTATION',
                     blocking: false,
                     reason: `照片帶有 EXIF 旋轉標籤 (Orientation=${imgMeta.exif_orientation})`,
-                    suggestion: '請於畫布確認標記框方向是否正確。'
+                    suggestion: ''
                 });
             }
 
@@ -1770,9 +1883,9 @@
                 } else if (['FORMAT_ERR', 'CLASS_ID_NOT_INT', 'COORD_NOT_FLOAT', 'NON_FINITE_COORD', 'READ_FAIL'].includes(c)) {
                     registerIssueGroup('FORMAT_ERR', '標記檔格式或欄位錯誤', 'error', 'studio_error', '檢視錯誤檔案', stem);
                 } else if (['ZERO_OR_NEG_SIZE', 'OVERSIZE_BOX', 'CENTER_OUT_OF_BOUNDS', 'EDGE_OUT_OF_BOUNDS', 'TINY_BOX'].includes(c)) {
-                    registerIssueGroup('COORD_ABNORMAL', '標記框座標超出範圍或尺寸異常', iss.level, 'studio_coord', '進入畫布微調', stem);
+                    registerIssueGroup('COORD_ABNORMAL', '標記框座標超出範圍或尺寸異常', iss.level, 'studio_coord', '檢視異常照片', stem);
                 } else if (c === 'DUPLICATE_BOX') {
-                    registerIssueGroup('DUPLICATE_BOX', '疑似重複疊加的標記框', 'warning', 'studio_dup', '進入畫布清理', stem);
+                    registerIssueGroup('DUPLICATE_BOX', '疑似重複疊加的標記框', 'warning', 'studio_dup', '檢視重複框照片', stem);
                 }
             }
 
@@ -1972,6 +2085,17 @@
             last_shared_name: classesInfo.last_shared_name || ''
         };
 
+        const activeClassNames = classesInfo.classes.map(c => c.name);
+        const clsSyncState = isMemScan
+            ? { needsClassesSync: false }
+            : await inspectWebFolderClassesSync(
+                labelProvider,
+                Boolean(classesInfo.is_shared_external),
+                Boolean(classesInfo.exists),
+                activeClassNames
+            );
+        const legacyWorkspaceExists = isMemScan ? false : await labelProvider.hasLegacyWorkspaceDir();
+
         return {
             ok: true,
             workspace_id: wsToken,
@@ -1981,12 +2105,14 @@
             label_dir: labelProvider.virtualPath,
             label_dir_name: labelProvider.name,
             same_folder_mode: imageProvider.virtualPath === labelProvider.virtualPath,
-            classes: classesInfo.classes.map(c => c.name),
+            classes: activeClassNames,
             classes_path: classesInfo.path,
             classes_file_exists: classesInfo.exists,
             candidate_class_files: classesInfo.candidate_files,
             classes_info: classesInfo,
             shared_classes_info: sharedClassesPayload,
+            legacy_workspace_exists: legacyWorkspaceExists,
+            needs_classes_sync: clsSyncState.needsClassesSync,
             class_usage: Object.keys(classUsageStats).map(Number).sort((a, b) => a - b).map(k => classUsageStats[k]),
             issue_groups: Array.from(issueGroupsMap.values()),
             summary,
@@ -2261,7 +2387,7 @@
         }
         const willWriteTotal = summary.will_create + summary.will_overwrite;
         if (summary.total_targets > 0 && willWriteTotal === 0 && blockingReasons.length === 0) {
-            blockingReasons.push(`勾選的 ${summary.total_targets} 張照片皆已有標記檔且目前已開啟「保護既有標記（不覆蓋）」。若確實要重新套用，請於進階設定勾選「覆蓋既有標記」。`);
+            blockingReasons.push(`已選的 ${summary.total_targets} 張照片皆已有標記檔；若要覆寫，請於「套用設定」勾選「覆蓋既有標記」。`);
         }
 
         summary.will_create_count = summary.will_create;
@@ -2571,6 +2697,7 @@
         if (classesModified) {
             const clsContent = orderedNames.join('\n') + (orderedNames.length > 0 ? '\n' : '');
             await writeActiveClassesText(classesInfo, labelProvider, clsContent);
+            await syncWebLocalClassesMirrorIfShared(labelProvider, classesInfo, orderedNames);
         }
 
         await labelProvider.writeBackupSnapshot(backupId, snapshot);
@@ -2615,6 +2742,7 @@
                 classes_file_exists: classesModified ? true : classesInfo.exists,
                 classes_path: finalClassesPath,
                 shared_classes_active: Boolean(classesInfo.is_shared_external),
+                ...(classesModified ? { needs_classes_sync: false } : {}),
                 last_backup: {
                     backup_id: backupId,
                     operation: 'canvas_box_edit',
@@ -2668,6 +2796,7 @@
         const orderedNames = rawClasses.map((name, idx) => String(name || '').trim() || `class_${idx}`);
         const clsContent = orderedNames.join('\n') + (orderedNames.length > 0 ? '\n' : '');
         await writeActiveClassesText(classesInfo, labelProvider, clsContent);
+        await syncWebLocalClassesMirrorIfShared(labelProvider, classesInfo, orderedNames);
         const classesFilename = classesInfo.filename || 'classes.txt';
         const finalClassesPath = classesInfo.path || `${labelProvider.virtualPath}/${classesFilename}`;
         if (!activeState.classesPath) activeState.classesPath = finalClassesPath;
@@ -2676,7 +2805,8 @@
             classes: orderedNames,
             classes_file_exists: true,
             classes_path: finalClassesPath,
-            shared_classes_active: Boolean(classesInfo.is_shared_external)
+            shared_classes_active: Boolean(classesInfo.is_shared_external),
+            needs_classes_sync: false
         };
     }
 
@@ -2722,14 +2852,14 @@
                     } else {
                         return {
                             ok: false,
-                            error: `照片 \`${st}\` 尚未建立標記檔 (.txt)。若此照片確實沒有目標物件，請點擊「確認為無物件照片」；否則請先套用參考照片或於畫布按「＋ 新增框 (W)」標記。`
+                            error: `照片 \`${st}\` 尚未建立標記檔 (.txt)`
                         };
                     }
                 }
                 const lblData = await labelProvider.readTextFile(filename);
                 const parsed = parseAndValidateYoloTxtContent(lblData.text, classMap, hasClasses);
                 if (parsed.is_empty_file && !allowEmpty) {
-                    return { ok: false, error: `標記檔 \`${st}.txt\` 為空白檔 (0 個標記框)。若確認為無物件背景照片，請使用無物件確認選項。` };
+                    return { ok: false, error: `標記檔 \`${st}.txt\` 為空白 (0 框)` };
                 }
                 if (parsed.has_blocking_error) {
                     const reasons = parsed.issues.filter(i => i.blocking).map(i => i.reason).join('；');
@@ -3067,6 +3197,10 @@
             await targetProvider.writeTextFile(item.filename, item.old_content);
             restoredCount += 1;
         }
+        for (const item of (snapshot.deleted_files || [])) {
+            await targetProvider.writeTextFile(item.filename, item.old_content);
+            restoredCount += 1;
+        }
         if (snapshot.external_classes_backup) {
             const extBak = snapshot.external_classes_backup;
             const extHandle = (extBak.path && customClassesFileHandles.get(extBak.path)?.handle) || sharedClassesState.handle;
@@ -3102,13 +3236,282 @@
             removed_created_files: removedCount
         });
 
-        const nextScan = await performFullScan();
+        const nextScan = await performFullScan({ skipClassesMirror: snapshot.op_type === 'training_fix' });
         return {
             ok: true,
             backup_id: targetBackupId,
             restored_count: restoredCount,
             removed_count: removedCount,
             message: `已還原上一步操作（恢復 ${restoredCount} 檔、移除新增 ${removedCount} 檔）`,
+            scan: nextScan
+        };
+    }
+
+    function clampYoloBoxToUnitLine(b) {
+        const cid = parseInt(b.class_id, 10);
+        const xc = Number(b.xc ?? b.x_center);
+        const yc = Number(b.yc ?? b.y_center);
+        const w = Number(b.w ?? b.width);
+        const h = Number(b.h ?? b.height);
+        const x1 = Math.max(0.0, Math.min(1.0, xc - w / 2.0));
+        const x2 = Math.max(0.0, Math.min(1.0, xc + w / 2.0));
+        const y1 = Math.max(0.0, Math.min(1.0, yc - h / 2.0));
+        const y2 = Math.max(0.0, Math.min(1.0, yc + h / 2.0));
+        const nw = Math.max(1e-6, Math.min(1.0, x2 - x1));
+        const nh = Math.max(1e-6, Math.min(1.0, y2 - y1));
+        const nxc = Math.max(nw / 2.0, Math.min(1.0 - nw / 2.0, (x1 + x2) / 2.0));
+        const nyc = Math.max(nh / 2.0, Math.min(1.0 - nh / 2.0, (y1 + y2) / 2.0));
+        return `${cid} ${nxc.toFixed(9)} ${nyc.toFixed(9)} ${nw.toFixed(9)} ${nh.toFixed(9)}`;
+    }
+
+    async function computeWebTrainingReadiness(labelProvider, imageProvider) {
+        const scan = await performFullScan({ skipClassesMirror: true });
+        if (!scan.ok) {
+            return { ok: false, error: scan.error || '無法檢查資料夾' };
+        }
+        const activeClasses = Array.isArray(scan.classes) ? scan.classes : [];
+        const sInfo = scan.shared_classes_info || {};
+        const sharedActive = Boolean(sInfo.active);
+        const {
+            classesInFolderExists,
+            classesInFolderSynced,
+            needsClassesSync
+        } = await inspectWebFolderClassesSync(
+            labelProvider,
+            sharedActive,
+            Boolean(scan.classes_file_exists),
+            activeClasses
+        );
+        const legacyWorkspaceExists = await labelProvider.hasLegacyWorkspaceDir();
+
+        const items = scan.items || [];
+        const orphanStems = [];
+        const edgeOobStems = [];
+        const duplicateBoxStems = [];
+        const tinyBoxStems = [];
+        const exifRotationStems = [];
+        const blockingErrorStems = [];
+        let hasAnyBoxed = false;
+
+        for (const it of items) {
+            if (it.pair_type === 'orphan_label') {
+                orphanStems.push(it.stem);
+                continue;
+            }
+            if (!it.has_image) continue;
+            if ((it.box_count || 0) > 0) hasAnyBoxed = true;
+            if (it.has_blocking_error) blockingErrorStems.push(it.stem);
+            const codes = new Set((it.issues || []).map(i => i.code));
+            if (codes.has('EDGE_OUT_OF_BOUNDS')) edgeOobStems.push(it.stem);
+            if (codes.has('DUPLICATE_BOX')) duplicateBoxStems.push(it.stem);
+            if (codes.has('TINY_BOX')) tinyBoxStems.push(it.stem);
+            if (codes.has('EXIF_ROTATION')) exifRotationStems.push(it.stem);
+        }
+
+        const summary = scan.summary || {};
+        const photoCount = Number(summary.photo_count || 0);
+        const unlabeledCount = Number(summary.unlabeled_count || 0);
+        const pendingReviewCount = Number(summary.review_pending_count || 0);
+        const needsFixCount = Number(summary.review_needs_fix_count || 0);
+        const confirmedCount = Number(summary.review_confirmed_count || 0);
+        const missingClassesForBoxes = Boolean(hasAnyBoxed && activeClasses.length === 0);
+
+        const autoFixableActions = [];
+        if (needsClassesSync) autoFixableActions.push('sync_classes');
+        if (legacyWorkspaceExists) autoFixableActions.push('clean_legacy_workspace');
+        if (orphanStems.length > 0) autoFixableActions.push('clean_orphans');
+        if (edgeOobStems.length > 0) autoFixableActions.push('clamp_edge_boxes');
+
+        const ready = Boolean(
+            photoCount > 0 &&
+            blockingErrorStems.length === 0 &&
+            !missingClassesForBoxes &&
+            unlabeledCount === 0 &&
+            autoFixableActions.length === 0
+        );
+        const hasWarnings = Boolean(
+            pendingReviewCount > 0 ||
+            duplicateBoxStems.length > 0 ||
+            tinyBoxStems.length > 0 ||
+            exifRotationStems.length > 0
+        );
+
+        return {
+            ok: true,
+            ready,
+            has_warnings: hasWarnings,
+            photo_count: photoCount,
+            confirmed_count: confirmedCount,
+            unlabeled_count: unlabeledCount,
+            pending_review_count: pendingReviewCount,
+            needs_fix_count: needsFixCount,
+            classes_count: activeClasses.length,
+            classes_in_folder_exists: classesInFolderExists,
+            classes_in_folder_synced: classesInFolderSynced,
+            needs_classes_sync: needsClassesSync,
+            shared_classes_active: sharedActive,
+            missing_classes_for_boxes: missingClassesForBoxes,
+            legacy_workspace_exists: legacyWorkspaceExists,
+            orphan_label_stems: orphanStems,
+            edge_oob_stems: edgeOobStems,
+            duplicate_box_stems: duplicateBoxStems,
+            tiny_box_stems: tinyBoxStems,
+            exif_rotation_stems: exifRotationStems,
+            blocking_error_stems: blockingErrorStems,
+            auto_fixable_actions: autoFixableActions,
+            can_auto_fix_count: autoFixableActions.length
+        };
+    }
+
+    async function handleTrainingCheck(payload) {
+        const labelProvider = activeState.labelProvider || activeState.imageProvider;
+        const imageProvider = activeState.imageProvider;
+        if (!labelProvider || !imageProvider) {
+            return { ok: false, error: '請先載入照片資料夾' };
+        }
+        const mode = (payload && payload.mode) || 'inspect';
+        if (mode !== 'fix') {
+            const readiness = await computeWebTrainingReadiness(labelProvider, imageProvider);
+            return { ok: readiness.ok, readiness, error: readiness.error || '' };
+        }
+
+        const requested = Array.isArray(payload.actions) && payload.actions.length > 0 ? payload.actions : ['fix_all'];
+        const actionSet = requested.includes('fix_all')
+            ? new Set(['sync_classes', 'clean_legacy_workspace', 'clean_orphans', 'clamp_edge_boxes'])
+            : new Set(requested.filter(a => ['sync_classes', 'clean_legacy_workspace', 'clean_orphans', 'clamp_edge_boxes'].includes(a)));
+
+        const state = await loadProjectState(labelProvider);
+        let legacyRemoved = false;
+        if (actionSet.has('clean_legacy_workspace') && await labelProvider.hasLegacyWorkspaceDir()) {
+            await saveProjectState(labelProvider, state);
+            legacyRemoved = await labelProvider.removeLegacyWorkspaceDir();
+        }
+
+        const scan = await performFullScan({ skipClassesMirror: true });
+        if (!scan.ok) {
+            return { ok: false, error: scan.error || '無法掃描資料夾' };
+        }
+        const activeClasses = Array.isArray(scan.classes) ? scan.classes : [];
+        const sInfo = scan.shared_classes_info || {};
+        const plannedWrites = [];
+        const plannedDeletes = [];
+
+        if (actionSet.has('sync_classes') && activeClasses.length > 0) {
+            const syncCheck = await inspectWebFolderClassesSync(
+                labelProvider,
+                Boolean(sInfo.active),
+                Boolean(scan.classes_file_exists),
+                activeClasses
+            );
+            if (!syncCheck.classesInFolderSynced) {
+                plannedWrites.push({
+                    stem: '__classes__',
+                    filename: 'classes.txt',
+                    content: activeClasses.join('\n') + '\n',
+                    resetConfirm: false
+                });
+            }
+        }
+
+        for (const it of (scan.items || [])) {
+            if (actionSet.has('clean_orphans') && it.pair_type === 'orphan_label' && it.label_name) {
+                if (await labelProvider.fileExists(it.label_name)) {
+                    plannedDeletes.push({ stem: it.stem, filename: it.label_name });
+                }
+            } else if (actionSet.has('clamp_edge_boxes') && it.has_image && !it.has_blocking_error && Array.isArray(it.boxes) && it.boxes.length > 0) {
+                const codes = new Set((it.issues || []).map(i => i.code));
+                if (codes.has('EDGE_OUT_OF_BOUNDS') && it.label_name) {
+                    const lines = it.boxes.map(clampYoloBoxToUnitLine);
+                    plannedWrites.push({
+                        stem: it.stem,
+                        filename: it.label_name,
+                        content: lines.join('\n') + (lines.length > 0 ? '\n' : ''),
+                        resetConfirm: true
+                    });
+                }
+            }
+        }
+
+        let backupId = null;
+        let classesSynced = false;
+        let orphansRemoved = 0;
+        let clampedFiles = 0;
+
+        if (plannedWrites.length > 0 || plannedDeletes.length > 0) {
+            backupId = makeBackupId('trainfix');
+            const itemRecords = state.item_records || {};
+            state.item_records = itemRecords;
+            const snapshot = {
+                backup_id: backupId,
+                op_type: 'training_fix',
+                timestamp: nowStr(),
+                target_out_dir: labelProvider.virtualPath,
+                created_files: [],
+                overwritten_files: [],
+                deleted_files: [],
+                previous_item_records: JSON.parse(JSON.stringify(itemRecords))
+            };
+
+            for (const w of plannedWrites) {
+                if (await labelProvider.fileExists(w.filename)) {
+                    const oldF = await labelProvider.readTextFile(w.filename);
+                    snapshot.overwritten_files.push({ filename: w.filename, old_content: oldF.text });
+                } else {
+                    snapshot.created_files.push(w.filename);
+                }
+            }
+            for (const d of plannedDeletes) {
+                const oldF = await labelProvider.readTextFile(d.filename);
+                snapshot.deleted_files.push({ filename: d.filename, old_content: oldF.text });
+            }
+
+            for (const w of plannedWrites) {
+                await labelProvider.writeTextFile(w.filename, w.content);
+                if (w.stem === '__classes__') {
+                    classesSynced = true;
+                } else {
+                    clampedFiles += 1;
+                    if (w.resetConfirm && itemRecords[w.stem]) {
+                        itemRecords[w.stem].confirmed_hash = '';
+                        if (itemRecords[w.stem].review_state === 'confirmed') {
+                            itemRecords[w.stem].review_state = '';
+                        }
+                        itemRecords[w.stem].updated_at = nowStr();
+                    }
+                }
+            }
+            for (const d of plannedDeletes) {
+                await labelProvider.removeFile(d.filename);
+                delete itemRecords[d.stem];
+                orphansRemoved += 1;
+            }
+
+            await labelProvider.writeBackupSnapshot(backupId, snapshot);
+            state.last_backup_id = backupId;
+            await saveProjectState(labelProvider, state);
+            await appendAuditLog(labelProvider, {
+                op_type: '訓練前整理',
+                backup_id: backupId,
+                classes_synced: classesSynced,
+                orphans_removed: orphansRemoved,
+                clamped_files: clampedFiles,
+                legacy_removed: legacyRemoved
+            });
+        }
+
+        const readiness = await computeWebTrainingReadiness(labelProvider, imageProvider);
+        const nextScan = await performFullScan({ skipClassesMirror: true });
+        return {
+            ok: true,
+            fixed: {
+                ok: true,
+                backup_id: backupId,
+                legacy_removed: legacyRemoved,
+                classes_synced: classesSynced,
+                orphans_removed: orphansRemoved,
+                clamped_files: clampedFiles
+            },
+            readiness,
             scan: nextScan
         };
     }
@@ -3380,6 +3783,10 @@
             return await handleUndo(payload);
         }
 
+        if (pathname === '/api/training_check') {
+            return await handleTrainingCheck(payload);
+        }
+
         if (pathname === '/api/open_folder' || pathname === '/api/open_explorer') {
             return { ok: true };
         }
@@ -3468,9 +3875,6 @@
             if (typeof scanCurrentWorkspace === 'function') {
                 await scanCurrentWorkspace({ restoreSession: true });
             }
-            if (typeof showToast === 'function') {
-                showToast(`已恢復上次資料夾：${savedHandle.name}`, 'success');
-            }
         } catch (err) {
             if (typeof showToast === 'function') {
                 showToast(`無法恢復上次資料夾，請重新選擇：${err.message}`, 'warn');
@@ -3489,9 +3893,9 @@
 
         // 2. 將路徑輸入框設為唯讀，點擊時直接開啟檔案或資料夾選擇視窗
         const pathInputs = [
-            { id: 'inputImageDirLoaded', mode: 'folder', placeholder: '點擊右側「選擇資料夾...」授權存取' },
-            { id: 'inputClassesPath', mode: 'file', placeholder: '自動尋找 classes.txt，或點擊右側指定' },
-            { id: 'inputCopyOutputDir', mode: 'folder', placeholder: '預設：目前資料夾（或點右側另選其他資料夾）' }
+            { id: 'inputImageDirLoaded', mode: 'folder', placeholder: '點擊選擇資料夾' },
+            { id: 'inputClassesPath', mode: 'file', placeholder: '自動尋找 classes.txt' },
+            { id: 'inputCopyOutputDir', mode: 'folder', placeholder: '預設：目前資料夾' }
         ];
         for (const cfg of pathInputs) {
             const el = document.getElementById(cfg.id);
@@ -3499,7 +3903,6 @@
                 el.readOnly = true;
                 el.placeholder = cfg.placeholder;
                 el.style.cursor = 'pointer';
-                el.title = '請點擊選擇本機資料夾或檔案';
                 el.addEventListener('click', () => {
                     if (cfg.id === 'inputClassesPath' && typeof pickSharedClassesFile === 'function') {
                         pickSharedClassesFile();
@@ -3516,8 +3919,9 @@
             const hasFsApi = typeof window.showDirectoryPicker === 'function';
             const browserNotice = hasFsApi
                 ? ''
-                : `<div style="margin-bottom:10px;padding:8px 12px;background:#FEF3C7;border:1px solid #F59E0B;border-radius:6px;color:#92400E;font-size:14px;">
-                    ⚠️ 偵測到目前瀏覽器不支援直接讀寫本機資料夾，請使用桌面版 <strong>Microsoft Edge</strong> 或 <strong>Google Chrome</strong> 開啟本網頁。
+                : `<div class="remap-shared-warning">
+                    <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+                    <span>偵測到目前瀏覽器不支援直接讀寫本機資料夾，請使用桌面版 <strong>Microsoft Edge</strong> 或 <strong>Google Chrome</strong> 開啟本網頁。</span>
                    </div>`;
 
             pathBox.style.display = hasFsApi ? 'none' : 'block';
@@ -3532,14 +3936,18 @@
                 if (savedHandle && area) {
                     pathBox.style.display = 'block';
                     area.style.display = 'block';
-                    area.innerHTML = `
-                        <button type="button" class="btn btn-secondary" id="btnWebRestoreLast" style="width:100%;justify-content:center;font-weight:700;">
-                            📂 繼續上次使用的資料夾：「${savedHandle.name}」
-                        </button>
-                    `;
-                    document.getElementById('btnWebRestoreLast').addEventListener('click', () => {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.id = 'btnWebRestoreLast';
+                    btn.className = 'btn btn-secondary btn-block';
+                    btn.innerHTML = '<svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+                    const label = document.createElement('span');
+                    label.textContent = `繼續上次使用的資料夾：「${savedHandle.name}」`;
+                    btn.appendChild(label);
+                    btn.addEventListener('click', () => {
                         restoreLastAuthorizedDirectory(savedHandle);
                     });
+                    area.replaceChildren(btn);
                 }
             });
         }

@@ -8,10 +8,34 @@
 
 let scanData = null;
 
+const UI_ICON_PATHS = {
+    'check': '<path d="M20 6 9 17l-5-5"/>',
+    'check-circle': '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+    'alert': '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+    'x-circle': '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
+    'info': '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+    'folder': '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+    'folders': '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M2 10h20"/>',
+    'file': '<path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/>',
+    'plus': '<path d="M12 5v14"/><path d="M5 12h14"/>',
+    'link': '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+    'star': '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+    'grip': '<circle cx="9" cy="6" r="1.35" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.35" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.35" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.35" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.35" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.35" fill="currentColor" stroke="none"/>'
+};
+
+function uiIcon(name, extraCls = '') {
+    const body = UI_ICON_PATHS[name];
+    if (!body) return '';
+    const cls = extraCls ? `ui-icon ${extraCls}` : 'ui-icon';
+    return `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
+}
+
 function workspaceFetch(url, options = {}, workspace = scanData?.workspace_id) {
-    return fetch(url, { ...options, headers: {
-        ...options.headers, 'X-YOLO-Workspace': workspace || ''
-    }}).then(response => {
+    return fetch(url, {
+        ...options, headers: {
+            ...options.headers, 'X-YOLO-Workspace': workspace || ''
+        }
+    }).then(response => {
         const readJson = response.json.bind(response);
         response.json = async () => {
             const data = await readJson();
@@ -79,6 +103,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
     initCanvasInteraction();
     initPhotoListWidth();
+    initCopyPhotoGridHoverPreview();
     document.documentElement.dataset.textSize = 'standard';
     if (typeof ResizeObserver !== 'undefined') {
         const observer = new ResizeObserver(() => {
@@ -90,6 +115,7 @@ window.addEventListener('DOMContentLoaded', () => {
     initKeyboardShortcuts();
 
     window.addEventListener('resize', () => {
+        hideCopyPhotoHoverPreview();
         if (currentStep === 'review') updateReviewLayout();
     });
 });
@@ -118,6 +144,7 @@ async function switchStep(stepName) {
         const flushed = await flushUnsavedCanvasDraftIfNeeded();
         if (!flushed) return;
     }
+    hideCopyPhotoHoverPreview();
     currentStep = stepName;
 
     document.querySelectorAll('.workspace-nav-btn').forEach(btn => {
@@ -151,7 +178,7 @@ async function saveSessionProgress() {
                 review_queue: reviewQueue
             })
         });
-    } catch (_) {}
+    } catch (_) { }
 }
 
 // ============================================================================
@@ -161,7 +188,7 @@ let isPickingPath = false;
 
 async function pickAndLoadFolder() {
     if (isPickingPath) {
-        showToast('資料夾選擇視窗已經開啟，請查看桌面或工作列彈出視窗。', 'info');
+        showToast('選擇視窗已開啟', 'info');
         return;
     }
     isPickingPath = true;
@@ -169,9 +196,8 @@ async function pickAndLoadFolder() {
     const origText = welcomeBtn ? welcomeBtn.textContent : '選擇照片資料夾';
     if (welcomeBtn) {
         welcomeBtn.disabled = true;
-        welcomeBtn.textContent = '正在開啟資料夾選擇視窗...';
+        welcomeBtn.textContent = '開啟中...';
     }
-    showToast(window.YOLO_WEB_MODE ? '請在彈出的視窗選擇照片資料夾並點選「允許」...' : '正在開啟 Windows 資料夾選擇視窗...', 'info');
 
     try {
         const res = await fetch('/api/pick_path', {
@@ -199,17 +225,16 @@ async function pickAndLoadFolder() {
             document.getElementById('inputImageDirLoaded').value = data.path;
             document.getElementById('inputClassesPath').value = '';
             await scanCurrentWorkspace({ restoreSession: true });
-            showToast(`已成功載入資料夾：${scanData?.folder_name || data.path}`, 'success');
         } else if (data.ok && data.cancelled) {
-            showToast('已取消選擇資料夾', 'info');
+            // Cancelled intentionally by user
         } else {
-            showToast(data.error || '無法開啟系統資料夾選擇器，已為您展開手動路徑輸入框。', 'warn');
+            showToast(data.error || '無法開啟系統資料夾選擇器，已展開手動路徑輸入框', 'warn');
             const detailsEl = document.querySelector('.manual-path-details');
             if (detailsEl) detailsEl.open = true;
             toggleLoadSettingsPanel(true);
         }
     } catch (e) {
-        showToast('無法開啟系統資料夾選擇器，請於下方手動貼上資料夾路徑。', 'error');
+        showToast('無法開啟資料夾選擇器，請於下方貼上路徑', 'error');
         const detailsEl = document.querySelector('.manual-path-details');
         if (detailsEl) detailsEl.open = true;
         toggleLoadSettingsPanel(true);
@@ -224,11 +249,10 @@ async function pickAndLoadFolder() {
 
 async function pickPath(inputId, mode) {
     if (isPickingPath) {
-        showToast('選擇視窗已經開啟，請查看桌面或工作列彈出視窗。', 'info');
+        showToast('選擇視窗已開啟', 'info');
         return;
     }
     isPickingPath = true;
-    showToast('正在開啟系統選擇視窗...', 'info');
     try {
         const res = await fetch('/api/pick_path', {
             method: 'POST',
@@ -314,7 +338,7 @@ function saveLocalSharedClassesCfg(cfg) {
             lockOverride: Boolean(cfg.lockOverride),
             boundWorkspaces: Array.isArray(cfg.boundWorkspaces) ? cfg.boundWorkspaces : []
         }));
-    } catch (_) {}
+    } catch (_) { }
 }
 
 function isMemoryOrSampleScan(scan) {
@@ -428,17 +452,17 @@ function renderSharedClassesGuidance() {
         if (sInfo && sInfo.needs_permission && !sInfo.active) {
             pillBtn.classList.add('is-pending-auth');
             pillBtn.onclick = () => authorizeAndApplySharedClasses();
-            pillText.textContent = `⚠ 點此授權共用類別：${sInfo.file_name || 'classes.txt'}`;
+            pillText.textContent = `授權共用類別：${sInfo.file_name || 'classes.txt'}`;
             pillBtn.style.display = 'inline-flex';
         } else if (sInfo && sInfo.active) {
             pillBtn.classList.remove('is-pending-auth');
             pillBtn.onclick = () => openModal('pathSettingsModal');
-            pillText.textContent = `📌 共用類別：${sInfo.file_name || 'classes.txt'} (${classesList.length}類)`;
+            pillText.textContent = `共用類別：${sInfo.file_name || 'classes.txt'} (${classesList.length} 類)`;
             pillBtn.style.display = 'inline-flex';
         } else if (sInfo && sInfo.has_binding) {
             pillBtn.classList.remove('is-pending-auth');
             pillBtn.onclick = () => openModal('pathSettingsModal');
-            pillText.textContent = `📌 已綁共用檔（目前用本機類別檔）`;
+            pillText.textContent = `已綁共用檔（本機模式）`;
             pillBtn.style.display = 'inline-flex';
         } else {
             pillBtn.style.display = 'none';
@@ -449,7 +473,7 @@ function renderSharedClassesGuidance() {
         if (sInfo && sInfo.has_binding) {
             optRow.style.display = 'flex';
             if (optBadge) {
-                optBadge.textContent = sInfo.active ? '✅ 目前資料夾使用中共用檔' : (sInfo.needs_permission ? '⚠️ 待授權共用檔' : '⏸️ 已綁定但未覆蓋本機檔');
+                optBadge.textContent = sInfo.active ? '共用中' : (sInfo.needs_permission ? '待授權共用檔' : '已綁定共用檔');
             }
             if (optPath) {
                 optPath.textContent = sInfo.virtual_path || sInfo.file_name || '';
@@ -478,9 +502,8 @@ function renderSharedClassesGuidance() {
             subtitle: '',
             bodyHtml: `
                 <div class="setup-auth-card">
-                    <p>點擊下方「<strong>一鍵授權並繼續共用</strong>」，並允許瀏覽器讀寫該檔案，即可讓此資料夾沿用原本共用的類別定義。</p>
                     <div class="setup-auth-actions">
-                        <button type="button" class="btn btn-primary btn-lg" onclick="authorizeAndApplySharedClasses()">✓ 一鍵授權並繼續共用</button>
+                        <button type="button" class="btn btn-primary btn-lg" onclick="authorizeAndApplySharedClasses()">${uiIcon('check', 'ui-icon-sm')}<span>一鍵授權並繼續共用</span></button>
                         <button type="button" class="btn btn-secondary" onclick="clearSharedClassesBinding()">改用本機檔</button>
                     </div>
                 </div>
@@ -488,10 +511,10 @@ function renderSharedClassesGuidance() {
         };
         loadCardTheme = 'guide-warn';
         loadCardHtml = buildSharedGuideBannerHtml({
-            title: modalConfig.title,
+            title: `${uiIcon('alert', 'ui-icon-sm')}<span>${modalConfig.title}</span>`,
             desc: '',
             actions: [
-                { label: '✓ 一鍵授權並繼續共用', cls: 'btn btn-primary btn-sm', onclick: 'authorizeAndApplySharedClasses()' },
+                { label: `${uiIcon('check', 'ui-icon-xs')}<span>一鍵授權並繼續共用</span>`, cls: 'btn btn-primary btn-sm', onclick: 'authorizeAndApplySharedClasses()' },
                 { label: '改用本機檔', cls: 'btn btn-secondary btn-sm', onclick: 'clearSharedClassesBinding()' }
             ]
         });
@@ -502,9 +525,9 @@ function renderSharedClassesGuidance() {
         }
     } else if ((!sInfo || !sInfo.has_binding) && !scanData.classes_file_exists && classesList.length === 0) {
         const reuseLastSharedBtnHtml = (sInfo && sInfo.last_shared_available && sInfo.last_shared_name)
-            ? `<button type="button" class="btn btn-primary" onclick="useLastSharedClassesForCurrentFolder()">🔗 沿用上次共用檔（${escapeHtml(sInfo.last_shared_name)}）</button>`
+            ? `<button type="button" class="btn btn-primary" onclick="useLastSharedClassesForCurrentFolder()">${uiIcon('link', 'ui-icon-sm')}<span>沿用上次共用檔（${escapeHtml(sInfo.last_shared_name)}）</span></button>`
             : '';
-        // 全新無 classes.txt 的資料夾 — 寬敞雙欄圖示決策彈窗
+        // 全新無 classes.txt 的資料夾 — 單一或共用選擇彈窗
         modalConfig = {
             isWarn: false,
             title: '尚未建立類別檔 (classes.txt)',
@@ -513,37 +536,29 @@ function renderSharedClassesGuidance() {
                 <div class="setup-cards-grid">
                     <div class="setup-option-card">
                         <div class="setup-option-head">
-                            <h4>📁 只有這一個資料夾</h4>
+                            ${uiIcon('folder')}
+                            <h4>只有這一個資料夾</h4>
                         </div>
-                        <p class="setup-option-desc">畫框後自動於此資料夾建立 <code>classes.txt</code>。</p>
-                        <pre class="setup-folder-tree">📂 ${escapeHtml(scanData.folder_name || '專案資料夾')}/
-  ├── 🖼️ 照片_01.jpg
-  ├── 📄 照片_01.txt
-  └── 🏷️ classes.txt  ← 自動建在這</pre>
                         <div class="setup-card-actions">
-                            <button type="button" class="btn btn-primary btn-lg" onclick="startSingleFolderDirect()">＋ 直接畫框 (W)</button>
+                            <button type="button" class="btn btn-primary btn-lg" onclick="startSingleFolderDirect()">${uiIcon('plus', 'ui-icon-sm')}<span>直接畫框 (W)</span></button>
                         </div>
                     </div>
                     <div class="setup-option-card">
                         <div class="setup-option-head">
-                            <h4>📂 分成多個資料夾（如 ok/、ng/）</h4>
+                            ${uiIcon('folders')}
+                            <h4>分成多個資料夾（如 ok/、ng/）</h4>
                         </div>
-                        <p class="setup-option-desc">把類別檔放上一層共用，切換資料夾自動同步。</p>
-                        <pre class="setup-folder-tree">📂 上層資料夾/
-  ├── 🏷️ classes.txt  ← 共用這份
-  ├── 📁 ok/  (照片與標記)
-  └── 📁 ng/  (照片與標記)</pre>
                         <div class="setup-card-actions">
                             ${reuseLastSharedBtnHtml}
-                            <button type="button" class="btn btn-secondary btn-lg" onclick="createSharedClassesFile()">✨ 新建共用檔</button>
-                            <button type="button" class="btn btn-ghost" onclick="pickSharedClassesFile()">📄 挑選現有檔案</button>
+                            <button type="button" class="btn btn-secondary btn-lg" onclick="createSharedClassesFile()">${uiIcon('plus', 'ui-icon-sm')}<span>新建共用檔</span></button>
+                            <button type="button" class="btn btn-ghost" onclick="pickSharedClassesFile()">${uiIcon('file', 'ui-icon-sm')}<span>挑選現有檔案</span></button>
                         </div>
                     </div>
                 </div>
             `
         };
         loadCardHtml = buildSharedGuideBannerHtml({
-            title: '💡 尚未建立類別檔 (classes.txt)',
+            title: `${uiIcon('info', 'ui-icon-sm')}<span>尚未建立類別檔 (classes.txt)</span>`,
             desc: '',
             actions: [
                 { label: '設定類別檔', cls: 'btn btn-primary btn-sm', onclick: 'openSharedClassesSetupModalManually()' }
@@ -563,7 +578,7 @@ function renderSharedClassesGuidance() {
         applyBannerState(reviewBanner, false);
     }
 
-    if (modalConfig && hasPhotos && !isDismissed && !isGuidedTourActive() && (!activeModal || activeModal.id === 'sharedClassesSetupModal')) {
+    if (modalConfig && hasPhotos && !isDismissed && (!activeModal || activeModal.id === 'sharedClassesSetupModal')) {
         populateSharedSetupModal(modalConfig);
         if (!activeModal || activeModal.id !== 'sharedClassesSetupModal') {
             openModal('sharedClassesSetupModal');
@@ -661,7 +676,7 @@ async function applyPickedSharedClassesResult(data, extraBoundPaths = []) {
 
 async function createSharedClassesFile(options = {}) {
     if (isPickingPath) {
-        showToast('選擇視窗已經開啟，請完成或取消目前視窗。', 'info');
+        showToast('選擇視窗已開啟', 'info');
         return;
     }
     isPickingPath = true;
@@ -708,7 +723,7 @@ async function createSharedClassesFile(options = {}) {
 
 async function pickSharedClassesFile() {
     if (isPickingPath) {
-        showToast('選擇視窗已經開啟，請查看桌面或瀏覽器對話框。', 'info');
+        showToast('選擇視窗已開啟', 'info');
         return;
     }
     isPickingPath = true;
@@ -727,7 +742,7 @@ async function pickSharedClassesFile() {
         if (data.ok && data.path) {
             const ok = await applyPickedSharedClassesResult(data);
             if (ok) {
-                showToast(`已連結共用類別檔：${data.file_name || data.path}`, 'success');
+                showToast(`已共用類別：${data.file_name || 'classes.txt'}`, 'success');
             }
         } else if (!data.ok) {
             showToast(data.error || '無法開啟檔案選擇視窗', 'warn');
@@ -760,7 +775,7 @@ async function authorizeAndApplySharedClasses() {
                 if (activeModal && activeModal.id === 'sharedClassesSetupModal') {
                     closeModal('sharedClassesSetupModal');
                 }
-                showToast(data.error || '找不到原本的共用類別檔（可能已被刪除），已自動清除舊設定。', 'warn');
+                showToast(data.error || '找不到原本的共用類別檔，已清除舊設定', 'warn');
                 if (scanData?.ok) {
                     await scanCurrentWorkspace({
                         classesPathOverride: '',
@@ -781,7 +796,7 @@ async function authorizeAndApplySharedClasses() {
             classesPathOverride: data.path || '',
             keepStep: currentStep !== 'load'
         });
-        showToast(`已重新授權共用類別檔：${data.file_name || 'classes.txt'}`, 'success');
+        showToast(`已授權共用類別：${data.file_name || 'classes.txt'}`, 'success');
     } catch (e) {
         showToast('授權共用類別檔失敗', 'error');
     }
@@ -795,7 +810,7 @@ async function useLastSharedClassesForCurrentFolder() {
     }
     const cfg = loadLocalSharedClassesCfg();
     if (!cfg.path) {
-        showToast('找不到先前的共用類別檔記錄，請改用「挑選現有檔案」。', 'warn');
+        showToast('找不到先前的共用類別檔記錄', 'warn');
         return;
     }
     const boundSet = new Set(cfg.boundWorkspaces || []);
@@ -811,7 +826,7 @@ async function useLastSharedClassesForCurrentFolder() {
         classesPathOverride: cfg.path,
         keepStep: currentStep !== 'load'
     });
-    showToast(`已沿用共用類別檔：${cfg.fileName || 'classes.txt'}`, 'success');
+    showToast(`已沿用共用類別：${cfg.fileName || 'classes.txt'}`, 'success');
 }
 
 async function toggleLockSharedClasses(checked) {
@@ -834,7 +849,7 @@ async function toggleLockSharedClasses(checked) {
             keepStep: currentStep !== 'load'
         });
     }
-    showToast(lockOverride ? '已設定優先使用共用類別檔' : '已改回尊重資料夾既有類別檔', 'info');
+    showToast(lockOverride ? '優先使用共用類別' : '改用資料夾類別檔', 'info');
 }
 
 async function clearSharedClassesBinding() {
@@ -858,7 +873,7 @@ async function clearSharedClassesBinding() {
             keepStep: currentStep !== 'load'
         });
     }
-    showToast('已解除共用類別檔綁定，改用資料夾內本機類別檔', 'info');
+    showToast('已改用本機類別檔', 'info');
 }
 
 async function rescanFromLoadedSettings() {
@@ -953,10 +968,26 @@ async function scanCurrentWorkspace(options = {}) {
             localCanvasUndoStack = [];
             dragAction = null;
             selectedBoxIndex = -1;
+            copyHoverImgCache.clear();
+            hideCopyPhotoHoverPreview();
         }
         scanData = data;
         if (!scanData.shared_classes_info && !window.YoloWebEngine?.isActive()) {
             scanData.shared_classes_info = computePythonSharedClassesInfo(scanData, prevScanData?.shared_classes_info);
+        }
+        if (!window.YoloWebEngine?.isActive() && scanData.shared_classes_info?.active &&
+            !scanData.shared_classes_info?.lock_override && scanData.image_dir) {
+            const prevCfg = loadLocalSharedClassesCfg();
+            if (prevCfg.path) {
+                const boundSet = new Set(prevCfg.boundWorkspaces || []);
+                if (!boundSet.has(scanData.image_dir)) {
+                    boundSet.add(scanData.image_dir);
+                    saveLocalSharedClassesCfg({
+                        ...prevCfg,
+                        boundWorkspaces: Array.from(boundSet)
+                    });
+                }
+            }
         }
         if (scanData.shared_classes_info?.missing_file) {
             const missingName = scanData.shared_classes_info.file_name || 'classes.txt';
@@ -1040,6 +1071,112 @@ async function scanCurrentWorkspace(options = {}) {
 // ============================================================================
 // 頁首、導覽列與步驟 1 摘要渲染
 // ============================================================================
+function computeTrainCheckBadgeInfo(data) {
+    if (!data || !data.ok) {
+        return { level: 'none', count: 0 };
+    }
+    const photoCount = Number((data.summary ? data.summary.photo_count : data.photo_count) || 0);
+    if (photoCount === 0) {
+        return { level: 'none', count: 0 };
+    }
+    if (typeof data.ready === 'boolean' && Array.isArray(data.blocking_error_stems)) {
+        const errCnt = (data.blocking_error_stems.length > 0 ? 1 : 0) + (data.missing_classes_for_boxes ? 1 : 0);
+        const hasContentAlert = ((data.duplicate_box_stems || []).length > 0 || (data.tiny_box_stems || []).length > 0 || (data.exif_rotation_stems || []).length > 0) ? 1 : 0;
+        const warnCnt = (data.needs_classes_sync ? 1 : 0)
+            + (data.legacy_workspace_exists ? 1 : 0)
+            + (Number(data.unlabeled_count || 0) > 0 ? 1 : 0)
+            + ((data.orphan_label_stems || []).length > 0 ? 1 : 0)
+            + ((data.edge_oob_stems || []).length > 0 ? 1 : 0)
+            + hasContentAlert;
+        const total = errCnt + warnCnt;
+        if (errCnt > 0) return { level: 'error', count: total };
+        if (warnCnt > 0) return { level: 'warn', count: total };
+        return { level: 'ready', count: 0 };
+    }
+
+    const items = Array.isArray(data.items) ? data.items : [];
+    const classesArr = Array.isArray(data.classes) ? data.classes : [];
+    let hasBlockingErr = false;
+    let hasAnyBoxed = false;
+    let hasOrphan = false;
+    let hasEdgeOob = false;
+    let hasContentAlert = false;
+    let unlabeledFromItems = 0;
+
+    for (const it of items) {
+        if (it.pair_type === 'orphan_label') {
+            hasOrphan = true;
+            continue;
+        }
+        if (!it.has_image) continue;
+        if ((it.box_count || 0) > 0) hasAnyBoxed = true;
+        if (it.has_blocking_error) hasBlockingErr = true;
+        if (it.review_status === 'unlabeled') unlabeledFromItems += 1;
+        for (const iss of (it.issues || [])) {
+            if (iss.code === 'EDGE_OUT_OF_BOUNDS') hasEdgeOob = true;
+            if (iss.code === 'DUPLICATE_BOX' || iss.code === 'TINY_BOX' || iss.code === 'EXIF_ROTATION') {
+                hasContentAlert = true;
+            }
+        }
+    }
+
+    const summary = data.summary || {};
+    const hasUnlabeled = ('unlabeled_count' in summary) ? (Number(summary.unlabeled_count || 0) > 0) : (unlabeledFromItems > 0);
+    const missingClassesForBoxes = Boolean(hasAnyBoxed && classesArr.length === 0);
+    const errCnt = (hasBlockingErr ? 1 : 0) + (missingClassesForBoxes ? 1 : 0);
+    const warnCnt = (data.needs_classes_sync ? 1 : 0)
+        + (data.legacy_workspace_exists ? 1 : 0)
+        + (hasUnlabeled ? 1 : 0)
+        + (hasOrphan ? 1 : 0)
+        + (hasEdgeOob ? 1 : 0)
+        + (hasContentAlert ? 1 : 0);
+    const total = errCnt + warnCnt;
+    if (errCnt > 0) return { level: 'error', count: total };
+    if (warnCnt > 0) return { level: 'warn', count: total };
+    return { level: 'ready', count: 0 };
+}
+
+function updateTrainCheckButtonVisual(sourceData) {
+    const tcBtn = document.getElementById('btnUtilTrainCheck');
+    const tcBadge = document.getElementById('navBadgeTrainCheck');
+    if (!tcBtn) return;
+
+    tcBtn.classList.remove('has-train-error', 'has-train-warn', 'is-train-ready');
+    if (tcBadge) {
+        tcBadge.className = 'nav-pill';
+        tcBadge.style.display = 'none';
+        tcBadge.textContent = '';
+    }
+
+    const photoCnt = Number((sourceData?.summary ? sourceData.summary.photo_count : sourceData?.photo_count) ?? scanData?.summary?.photo_count ?? 0);
+    tcBtn.disabled = (photoCnt === 0);
+    if (photoCnt === 0) return;
+
+    const info = computeTrainCheckBadgeInfo(sourceData || scanData);
+    if (info.level === 'error') {
+        tcBtn.classList.add('has-train-error');
+        if (tcBadge) {
+            tcBadge.className = 'nav-pill error';
+            tcBadge.textContent = `${info.count}`;
+            tcBadge.style.display = 'inline-block';
+        }
+    } else if (info.level === 'warn') {
+        tcBtn.classList.add('has-train-warn');
+        if (tcBadge) {
+            tcBadge.className = 'nav-pill warn';
+            tcBadge.textContent = `${info.count}`;
+            tcBadge.style.display = 'inline-block';
+        }
+    } else if (info.level === 'ready') {
+        tcBtn.classList.add('is-train-ready');
+        if (tcBadge) {
+            tcBadge.className = 'nav-pill ok';
+            tcBadge.textContent = '✓';
+            tcBadge.style.display = 'inline-block';
+        }
+    }
+}
+
 function updateHeaderAndNavBadges() {
     if (!scanData || !scanData.ok) return;
     if (!scanData.shared_classes_info && !window.YoloWebEngine?.isActive()) {
@@ -1061,6 +1198,7 @@ function updateHeaderAndNavBadges() {
     document.getElementById('navBtnApply').disabled = (s.photo_count === 0);
     document.getElementById('navBtnReview').disabled = (s.photo_count === 0);
     document.getElementById('btnUtilRemap').disabled = (s.photo_count === 0);
+    updateTrainCheckButtonVisual(scanData);
 
     const hasUndo = Boolean(
         (dirtyCanvasStem && localCanvasUndoStack.length > 0) ||
@@ -1111,7 +1249,7 @@ function renderLoadStepSummary() {
         `;
     } else if (s.reference_candidate_count === 0) {
         headlineEl.textContent = `缺少參考照片`;
-        subtextEl.textContent = '請先標記一張照片。';
+        subtextEl.textContent = '';
         btnsEl.innerHTML = `
             <button class="btn btn-primary btn-lg" onclick="startLabelingFirstPhoto()">標記第 1 張照片</button>
             <button class="btn btn-secondary" onclick="switchStep('review')">前往檢視照片</button>
@@ -1163,7 +1301,7 @@ function renderIssueGroups(groups) {
         const pending = Math.max(0, (summary.photo_count || 0) - (summary.confirmed_count || 0));
         const message = !summary.photo_count ? '目前沒有可檢查的照片。'
             : pending ? `格式正常 · ${pending} 張待確認或修正`
-            : '所有照片皆已確認完成。';
+                : '所有照片皆已確認完成。';
         container.innerHTML = `
             <div class="project-normal-note">
                 ${message}
@@ -1405,7 +1543,7 @@ function buildCopyPhotoCardHtml(item) {
                 ${roleTag}
             </div>
             <div class="photo-card-body">
-                <div class="photo-card-title" title="${escapeHtml(item.image_name)}">${escapeHtml(item.image_name)}</div>
+                <div class="photo-card-title">${escapeHtml(item.image_name)}</div>
                 <div>${statusBadge}</div>
                 ${simHtml}
             </div>
@@ -1436,6 +1574,7 @@ function updateRecommendedGroupsStrip() {
 }
 
 function renderCopyPhotoGrid(resetCount = true) {
+    hideCopyPhotoHoverPreview();
     const grid = document.getElementById('copyPhotoGrid');
     const photos = (scanData.items || []).filter(i => i.has_image);
     document.getElementById('copyTargetCount').textContent = copySelectedStems.size;
@@ -1471,7 +1610,6 @@ function renderCopyPhotoGrid(resetCount = true) {
 
 function togglePhotoCardSelection(stem) {
     if (stem === masterStem) {
-        showToast('此張是目前選定的「參考照片」，無須複製給自己。', 'info');
         return;
     }
     if (copySelectedStems.has(stem)) {
@@ -1498,6 +1636,224 @@ function clearAllCopyTargets() {
     copySelectedStems.clear();
     renderCopyPhotoGrid();
     runMasterCopyPreview();
+}
+
+let copyHoverTimer = null;
+let copyHoverCardEl = null;
+let copyHoverStem = null;
+let copyHoverReqId = 0;
+const copyHoverImgCache = new Map();
+const COPY_HOVER_DWELL_MS = 160;
+
+function hideCopyPhotoHoverPreview() {
+    if (copyHoverTimer) {
+        clearTimeout(copyHoverTimer);
+        copyHoverTimer = null;
+    }
+    copyHoverReqId += 1;
+    copyHoverCardEl = null;
+    copyHoverStem = null;
+    const preview = document.getElementById('copyPhotoHoverPreview');
+    if (preview) preview.style.display = 'none';
+}
+
+function positionCopyPhotoHoverPreview(cardEl) {
+    const preview = document.getElementById('copyPhotoHoverPreview');
+    if (!preview || !cardEl || !cardEl.isConnected || preview.style.display === 'none') return;
+
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const cRect = cardEl.getBoundingClientRect();
+    const pRect = preview.getBoundingClientRect();
+    const popW = pRect.width || 420;
+    const popH = pRect.height || 340;
+    const gap = 14;
+    const edge = 12;
+
+    let left = cRect.right + gap;
+    let top = cRect.top + (cRect.height - popH) / 2;
+
+    if (left + popW > vw - edge) {
+        if (cRect.left - gap - popW >= edge) {
+            left = cRect.left - gap - popW;
+        } else if (vh - cRect.bottom - gap >= popH + edge) {
+            left = cRect.left + (cRect.width - popW) / 2;
+            top = cRect.bottom + gap;
+        } else {
+            left = cRect.left + (cRect.width - popW) / 2;
+            top = Math.max(edge, cRect.top - gap - popH);
+        }
+    }
+
+    left = Math.max(edge, Math.min(vw - popW - edge, Math.round(left)));
+    top = Math.max(edge, Math.min(vh - popH - edge, Math.round(top)));
+    preview.style.left = `${left}px`;
+    preview.style.top = `${top}px`;
+}
+
+function renderHoverPreviewCanvas(imgEl, item) {
+    const canvas = document.getElementById('copyHoverCanvas');
+    if (!canvas || !imgEl) return;
+    const ctx = canvas.getContext('2d');
+    const imgW = imgEl.naturalWidth || item.img_width || 640;
+    const imgH = imgEl.naturalHeight || item.img_height || 480;
+    const maxW = Math.min(520, Math.max(260, Math.round(window.innerWidth * 0.44)));
+    const maxH = Math.min(400, Math.max(180, Math.round(window.innerHeight * 0.56)));
+    const scale = Math.min(maxW / Math.max(1, imgW), maxH / Math.max(1, imgH));
+    const drawW = Math.max(120, Math.round(imgW * scale));
+    const drawH = Math.max(90, Math.round(imgH * scale));
+
+    if (canvas.width !== drawW) canvas.width = drawW;
+    if (canvas.height !== drawH) canvas.height = drawH;
+    canvas.style.width = `${drawW}px`;
+    canvas.style.height = `${drawH}px`;
+
+    ctx.clearRect(0, 0, drawW, drawH);
+    ctx.drawImage(imgEl, 0, 0, drawW, drawH);
+    if (Array.isArray(item.boxes) && item.boxes.length > 0) {
+        drawBoxesOnContext(ctx, item.boxes, drawW, drawH, -1, { compact: true });
+    }
+}
+
+function showCopyPhotoHoverPreview(cardEl, stem) {
+    if (currentStep !== 'apply' || activeModal) return;
+    const preview = document.getElementById('copyPhotoHoverPreview');
+    const canvas = document.getElementById('copyHoverCanvas');
+    const item = scanData?.items?.find(i => i.stem === stem);
+    if (!preview || !canvas || !cardEl?.isConnected || !item || !item.has_image) return;
+
+    const reqId = ++copyHoverReqId;
+    copyHoverStem = stem;
+
+    const nameEl = document.getElementById('copyHoverFileName');
+    const badgeEl = document.getElementById('copyHoverStatusBadge');
+    const footerEl = document.getElementById('copyHoverFooter');
+    if (nameEl) nameEl.textContent = item.image_name || item.stem;
+
+    if (badgeEl) {
+        if (item.stem === masterStem) {
+            badgeEl.className = 'badge badge-warn';
+            badgeEl.textContent = `參考 · ${item.box_count} 框`;
+        } else if (item.has_blocking_error) {
+            badgeEl.className = 'badge badge-err';
+            badgeEl.textContent = item.format_label || '格式異常';
+        } else if (item.has_label && item.box_count === 0) {
+            badgeEl.className = 'badge badge-warn';
+            badgeEl.textContent = '空白標記檔 · 0 框';
+        } else if (item.has_label) {
+            badgeEl.className = `badge ${item.review_status === 'confirmed' ? 'badge-ok' : 'badge-warn'}`;
+            badgeEl.textContent = `${item.review_label} · ${item.box_count} 框`;
+        } else {
+            badgeEl.className = 'badge badge-info';
+            badgeEl.textContent = '未標記';
+        }
+    }
+
+    if (footerEl) {
+        const boxes = Array.isArray(item.boxes) ? item.boxes : [];
+        let leftSummary = item.has_label ? '空白標記檔（0 個標記框）' : '尚未建立標記檔';
+        if (boxes.length > 0) {
+            const counts = new Map();
+            boxes.forEach(b => {
+                const label = b.class_name || `ID ${b.class_id}`;
+                counts.set(label, (counts.get(label) || 0) + 1);
+            });
+            leftSummary = Array.from(counts.entries()).map(([k, v]) => `${k} (${v})`).join('、');
+        }
+        const dims = (item.img_width && item.img_height) ? `${item.img_width} × ${item.img_height}` : '';
+        footerEl.innerHTML = `<span>${escapeHtml(leftSummary)}</span><span>${escapeHtml(dims)}</span>`;
+    }
+
+    const cached = copyHoverImgCache.get(stem);
+    const cardThumb = cardEl.querySelector('.photo-card-thumb img');
+    const readyImg = (cached && cached.complete && cached.naturalWidth > 0)
+        ? cached
+        : ((cardThumb && cardThumb.complete && cardThumb.naturalWidth > 0) ? cardThumb : null);
+
+    preview.style.display = 'block';
+
+    if (readyImg) {
+        renderHoverPreviewCanvas(readyImg, item);
+        positionCopyPhotoHoverPreview(cardEl);
+        return;
+    }
+
+    const estW = 340;
+    const estH = 220;
+    if (canvas.width !== estW) canvas.width = estW;
+    if (canvas.height !== estH) canvas.height = estH;
+    canvas.style.width = `${estW}px`;
+    canvas.style.height = `${estH}px`;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#141C22';
+    ctx.fillRect(0, 0, estW, estH);
+    ctx.fillStyle = '#9FB0BA';
+    ctx.font = '13px "Microsoft JhengHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('正在載入影像…', estW / 2, estH / 2);
+    positionCopyPhotoHoverPreview(cardEl);
+
+    const loader = new Image();
+    loader.onload = () => {
+        if (copyHoverImgCache.size >= 40) {
+            const oldestKey = copyHoverImgCache.keys().next().value;
+            if (oldestKey !== undefined) copyHoverImgCache.delete(oldestKey);
+        }
+        copyHoverImgCache.set(stem, loader);
+        if (reqId !== copyHoverReqId || copyHoverStem !== stem || !cardEl.isConnected) return;
+        renderHoverPreviewCanvas(loader, item);
+        positionCopyPhotoHoverPreview(cardEl);
+    };
+    loader.onerror = () => {
+        if (reqId !== copyHoverReqId || copyHoverStem !== stem) return;
+        ctx.fillStyle = '#141C22';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#F0AEA9';
+        ctx.font = '13px "Microsoft JhengHei", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('無法載入照片預覽', canvas.width / 2, canvas.height / 2);
+    };
+    loader.src = workspaceImage(stem);
+}
+
+function initCopyPhotoGridHoverPreview() {
+    const grid = document.getElementById('copyPhotoGrid');
+    if (!grid || grid.dataset.hoverBound) return;
+    grid.dataset.hoverBound = '1';
+
+    grid.addEventListener('mouseover', (e) => {
+        if (currentStep !== 'apply' || activeModal) {
+            hideCopyPhotoHoverPreview();
+            return;
+        }
+        const card = e.target?.closest?.('.photo-card[data-copy-stem]');
+        if (!card) {
+            hideCopyPhotoHoverPreview();
+            return;
+        }
+        if (card === copyHoverCardEl) return;
+
+        hideCopyPhotoHoverPreview();
+        copyHoverCardEl = card;
+        const stem = card.dataset.copyStem;
+        copyHoverTimer = setTimeout(() => {
+            copyHoverTimer = null;
+            if (copyHoverCardEl === card && card.isConnected) {
+                showCopyPhotoHoverPreview(card, stem);
+            }
+        }, COPY_HOVER_DWELL_MS);
+    });
+
+    grid.addEventListener('mouseout', (e) => {
+        if (!copyHoverCardEl) return;
+        const toCard = e.relatedTarget?.closest?.('.photo-card[data-copy-stem]');
+        if (toCard !== copyHoverCardEl) {
+            hideCopyPhotoHoverPreview();
+        }
+    });
+
+    grid.addEventListener('mouseleave', hideCopyPhotoHoverPreview);
+    grid.addEventListener('scroll', hideCopyPhotoHoverPreview, { passive: true });
 }
 
 async function runSimilarPhotoFinder() {
@@ -1606,13 +1962,15 @@ function copyPreviewMessage(message, action = '') {
 function renderWritePreview(items) {
     if (!items.length) return '<p class="empty-state">請選擇要套用的照片。</p>';
     return '<ul class="write-preview-list">' + items.map(p => {
-        const labels = {will_create: ['新增', 'badge-ok'], will_overwrite: ['覆蓋', 'badge-warn'],
-            skip_existing: ['略過', 'badge-neutral'], skip_self: ['略過', 'badge-neutral']};
+        const labels = {
+            will_create: ['新增', 'badge-ok'], will_overwrite: ['覆蓋', 'badge-warn'],
+            skip_existing: ['略過', 'badge-neutral'], skip_self: ['略過', 'badge-neutral']
+        };
         const [label, style] = labels[p.action] || ['阻擋', 'badge-err'];
         const detail = [...(p.warnings || [])];
         if (p.action !== 'will_create' && p.reason) detail.unshift(p.reason);
         return `<li class="write-preview-item">
-            <details class="preview-file"><summary title="展開完整檔名">${escapeHtml(p.image_name)}</summary>
+            <details class="preview-file"><summary>${escapeHtml(p.image_name)}</summary>
                 <div class="full-file-name">${escapeHtml(p.image_name)}</div></details>
             <span class="badge ${style}">${label}</span>
             ${detail.length ? `<p class="preview-reason">${escapeHtml(detail.join('；'))}</p>` : ''}
@@ -1631,15 +1989,15 @@ async function runMasterCopyPreview() {
     copyPreviewMessage('正在更新寫入預覽…');
     if (!masterStem) {
         summaryBox.textContent = '尚無可用的批次參考';
-        previewContainer.innerHTML = '<p class="empty-state">先準備一張已有標記的照片。</p>';
-        copyPreviewMessage('請先選擇有效的批次參考照片。');
+        previewContainer.innerHTML = '<p class="empty-state">請先選擇參考照片。</p>';
+        copyPreviewMessage('');
         return;
     }
     const payload = currentCopyPayload();
     const workspace = scanData.workspace_id;
     try {
         const res = await workspaceFetch('/api/master_copy/preview', {
-            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
         });
         const data = await res.json();
         if (requestId !== copyPreviewRequest || copyInProgress || workspace !== scanData?.workspace_id) return;
@@ -1650,15 +2008,15 @@ async function runMasterCopyPreview() {
         const sum = data.summary;
         const willApplyCnt = sum.will_create_count + sum.will_overwrite_count;
         summaryBox.innerHTML = `<strong>新增 ${sum.will_create_count} · 覆蓋 ${sum.will_overwrite_count} · 略過 ${sum.will_skip_count}</strong>
-            <div class="muted-text">既有標記：${payload.overwrite ? '允許覆蓋（原檔會備份）' : '保留'}</div>
+            <div class="muted-text">既有標記：${payload.overwrite ? '覆蓋' : '保留'}</div>
             <details class="output-path"><summary>輸出：${escapeHtml(data.output_dir_name || scanData.folder_name)}</summary>
                 <div class="full-file-name">${escapeHtml(payload.output_dir || scanData.image_dir || data.output_dir_name)}</div></details>`;
         previewContainer.innerHTML = renderWritePreview(data.preview_items);
         const blocking = data.blocking_reasons || [];
         if (willApplyCnt > 0 && !blocking.length) {
-            validatedCopyPayload = {workspace, payload};
+            validatedCopyPayload = { workspace, payload };
             execBtn.disabled = false; execBtn.textContent = `建立 ${willApplyCnt} 份草稿`;
-            copyPreviewMessage(sum.will_overwrite_count ? '將覆蓋列出的既有標記，原檔會備份。' : '建立後請逐張確認框位。');
+            copyPreviewMessage(sum.will_overwrite_count ? '將覆蓋列出的既有標記' : '');
         } else if (!payload.target_stems.length) {
             copyPreviewMessage('請先選擇要套用的照片。');
         } else if (!payload.overwrite && sum.will_skip_count === payload.target_stems.length && !willApplyCnt) {
@@ -1882,13 +2240,13 @@ function buildStudioListItemHtml(item, idx) {
     const isAct = item.stem === activeStem;
     const isRef = item.stem === masterStem;
 
-    let revBadge = `<span class="badge badge-warn">[!] 待確認</span>`;
-    if (item.review_status === 'confirmed') revBadge = `<span class="badge badge-ok">[✓] 已確認</span>`;
-    else if (item.review_status === 'needs_fix') revBadge = `<span class="badge badge-err">[!] 需修正</span>`;
+    let revBadge = `<span class="badge badge-warn">${uiIcon('alert', 'ui-icon-xs')}待確認</span>`;
+    if (item.review_status === 'confirmed') revBadge = `<span class="badge badge-ok">${uiIcon('check', 'ui-icon-xs')}已確認</span>`;
+    else if (item.review_status === 'needs_fix') revBadge = `<span class="badge badge-err">${uiIcon('x-circle', 'ui-icon-xs')}需修正</span>`;
     else if (item.review_status === 'unlabeled') revBadge = `<span class="badge badge-info">未標記</span>`;
 
     const fmtWarn = item.has_blocking_error
-        ? `<span class="text-red" style="font-weight:700;">[✕ ${escapeHtml(item.format_label)}]</span>`
+        ? `<span class="text-red">${uiIcon('x-circle', 'ui-icon-xs')} ${escapeHtml(item.format_label)}</span>`
         : '';
 
     return `
@@ -1898,7 +2256,7 @@ function buildStudioListItemHtml(item, idx) {
                     ${idx + 1}. ${escapeHtml(item.image_name || item.stem)}
                 </span>
             </div>
-            <div class="r-item-sub">${revBadge}${isRef ? '<span class="ref-badge">★ 參考照片</span>' : ''}<span>${item.box_count} 框</span></div>
+            <div class="r-item-sub">${revBadge}${isRef ? `<span class="ref-badge">${uiIcon('star', 'ui-icon-xs')}參考</span>` : ''}<span>${item.box_count} 框</span></div>
             ${fmtWarn ? `<div class="list-error">${fmtWarn}</div>` : ''}
         </button>
     `;
@@ -1909,11 +2267,14 @@ function renderStudioFileList(fromScroll = false) {
 
     const list = getActiveReviewItemsList();
     const container = document.getElementById('studioFileList');
-    const focusedStem = document.activeElement?.dataset?.reviewStem;
+    const activeReviewBtn = document.activeElement?.dataset?.reviewStem ? document.activeElement : null;
+    const focusedStem = (activeReviewBtn && activeReviewBtn.matches?.(':focus-visible'))
+        ? activeReviewBtn.dataset.reviewStem
+        : null;
     if (list.length === 0) {
         container.innerHTML = `
-            <div style="padding:16px;text-align:center;color:var(--text-muted);">
-                沒有符合的照片。<br>
+            <div class="review-list-empty">
+                沒有符合的照片<br>
                 <button class="btn-link" onclick="resetReviewFilters()">清除搜尋與篩選</button>
             </div>
         `;
@@ -2104,18 +2465,18 @@ function updateSaveIndicator(state, message, retry) {
     el.onclick = null;
     el.disabled = (state !== 'error' && state !== 'unsaved');
     if (state === 'saved') {
-        el.textContent = message || '[✓] 已儲存';
-        el.title = '已儲存';
+        el.textContent = message || '已儲存';
+        el.title = '';
     } else if (state === 'saving') {
-        el.textContent = message || '[...] 儲存中';
-        el.title = '儲存中…';
+        el.textContent = message || '儲存中';
+        el.title = '';
     } else if (state === 'unsaved') {
-        el.textContent = message || '[●] 尚未儲存（按 C 確認儲存）';
-        el.title = '點擊暫存草稿，或按 C 確認儲存';
+        el.textContent = message || '尚未儲存';
+        el.title = '點擊暫存草稿';
         el.onclick = () => flushUnsavedCanvasDraftIfNeeded();
     } else if (state === 'error') {
-        el.textContent = message || '[✕] 儲存失敗（點擊重試）';
-        el.title = '點擊重試儲存';
+        el.textContent = message || '儲存失敗（點擊重試）';
+        el.title = '點擊重試';
         el.onclick = retry || (() => retryLastFailedSave());
     }
 }
@@ -2131,7 +2492,7 @@ function renderInspectorAndCanvas() {
     const s = scanData.summary;
     if (!isSavingCanvas && !lastSaveFailed && !reviewUpdatePending) {
         if (dirtyCanvasStem && dirtyCanvasStem === activeStem) {
-            updateSaveIndicator('unsaved', '[●] 尚未儲存（按 C 確認儲存）');
+            updateSaveIndicator('unsaved', '尚未儲存');
         } else {
             updateSaveIndicator('saved');
         }
@@ -2172,7 +2533,7 @@ function renderInspectorAndCanvas() {
         document.getElementById('itemIssuesList').textContent = '';
         document.getElementById('targetCanvasCaption').textContent = '';
         loadImagesAndDrawCanvas(null);
-            document.getElementById('reviewCurrentFileName').title = '';
+        document.getElementById('reviewCurrentFileName').title = '';
         document.getElementById('reviewCurrentFileName').textContent = '沒有符合的照片';
         document.getElementById('inspectorBoxCount').textContent = '0';
         document.getElementById('itemBoxesList').textContent = '尚未選取照片';
@@ -2190,7 +2551,9 @@ function renderInspectorAndCanvas() {
     if (setMasterBtn) {
         setMasterBtn.classList.toggle('is-current-ref', isCurrentRef);
         setMasterBtn.setAttribute('aria-pressed', String(isCurrentRef));
-        setMasterBtn.textContent = isCurrentRef ? '★ 已設為參考' : '設為參考';
+        setMasterBtn.innerHTML = isCurrentRef
+            ? `${uiIcon('star', 'ui-icon-sm')}<span>已設為參考</span>`
+            : `${uiIcon('star', 'ui-icon-sm')}<span>設為參考</span>`;
     }
     document.getElementById('targetCanvasCaption').textContent =
         `${item.review_label}`;
@@ -2211,7 +2574,7 @@ function renderInspectorAndCanvas() {
         confirmBtn.textContent = hasNext ? '確認並下一張 (C)' : '確認並完成 (C)';
     }
 
-    confirmBtn.title = confirmBtn.textContent;
+    confirmBtn.title = '';
 
     // 右側照片狀態詳情
     const metaEl = document.getElementById('itemMetaDetails');
@@ -2227,15 +2590,18 @@ function renderInspectorAndCanvas() {
     const issuesEl = document.getElementById('itemIssuesList');
     if (!item.issues || item.issues.length === 0) {
         issuesEl.innerHTML = `
-            <div style="color:var(--status-green);font-weight:600;">
-                [✓] 檢查正常（共 ${item.box_count} 個框）
+            <div class="issues-ok-note">
+                ${uiIcon('check-circle', 'ui-icon-sm')}
+                <span>檢查正常（共 ${item.box_count} 個框）</span>
             </div>
         `;
     } else {
         issuesEl.innerHTML = item.issues.map(iss => {
             const cls = iss.level === 'error' ? 'text-red' : (iss.level === 'warning' ? 'text-amber' : 'text-blue');
-            const sym = iss.level === 'error' ? '[✕ 錯誤]' : (iss.level === 'warning' ? '[! 提醒]' : '[資訊]');
-            return `<div class="${cls}"><strong>${sym}</strong> ${escapeHtml(iss.message)}</div>`;
+            const badgeCls = iss.level === 'error' ? 'badge-err' : (iss.level === 'warning' ? 'badge-warn' : 'badge-info');
+            const ico = iss.level === 'error' ? uiIcon('x-circle', 'ui-icon-xs') : (iss.level === 'warning' ? uiIcon('alert', 'ui-icon-xs') : uiIcon('info', 'ui-icon-xs'));
+            const label = iss.level === 'error' ? '錯誤' : (iss.level === 'warning' ? '提醒' : '資訊');
+            return `<div class="issue-diag-row ${cls}"><span class="badge ${badgeCls}">${ico}${label}</span><span>${escapeHtml(iss.message)}</span></div>`;
         }).join('');
     }
 
@@ -2271,7 +2637,7 @@ function renderInspectorAndCanvas() {
 
     const boxesEl = document.getElementById('itemBoxesList');
     if (item.boxes.length === 0) {
-        boxesEl.innerHTML = `<div class="muted-text">沒有標記框（可點上方「＋ 新增框 (W)」直接在畫布拉框）。</div>`;
+        boxesEl.innerHTML = `<div class="muted-text">沒有標記框（可點上方「＋ 新增框 (W)」在照片上拉框）。</div>`;
     } else {
         boxesEl.innerHTML = item.boxes.map((b, idx) => {
             const color = CLASS_COLORS[b.class_id % CLASS_COLORS.length];
@@ -2286,7 +2652,7 @@ function renderInspectorAndCanvas() {
                 <div role="button" tabindex="0" class="box-row-item ${isSel ? 'selected' : ''}" aria-pressed="${isSel}" onclick="selectBoxFromList(${idx})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectBoxFromList(${idx});}">
                     <div class="box-row-main">
                         <span>
-                            <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${color};margin-right:5px;"></span>
+                            <span class="box-color-dot" style="background:${color};"></span>
                             ${idx + 1} · ${escapeHtml(b.class_name)}
                         </span>
                         ${inlineClsSelect}
@@ -2438,6 +2804,9 @@ async function persistClassesImmediately(classesList) {
         if ('shared_classes_active' in data && scanData.shared_classes_info) {
             scanData.shared_classes_info.active = Boolean(data.shared_classes_active);
         }
+        if ('needs_classes_sync' in data) {
+            scanData.needs_classes_sync = Boolean(data.needs_classes_sync);
+        }
         return true;
     } catch (_) {
         showToast('儲存新類別失敗，請確認連線或檔案狀態', 'error');
@@ -2533,7 +2902,6 @@ async function confirmNewBoxClassModal() {
     markCanvasDraftDirty(item, snap);
     if (isBrandNewClass) {
         renderClassRemapEditor();
-        showToast(`已新增類別「${targetName}」`, 'success');
     }
     renderSharedClassesGuidance();
 }
@@ -2553,7 +2921,6 @@ async function duplicateSelectedBoxOnCanvas() {
     const item = scanData?.items?.find(i => i.stem === activeStem);
     if (isSavingCanvas || lastSaveFailed || reviewUpdatePending || !item || !Array.isArray(item.boxes)) return;
     if (selectedBoxIndex < 0 || selectedBoxIndex >= item.boxes.length) {
-        showToast('請先點選要複製的標記框', 'info');
         return;
     }
     const snap = snapshotItemForUndo(item);
@@ -2838,7 +3205,7 @@ function getComparisonReference(item) {
     return scanData.items.find(photo => photo.has_image && photo.is_valid_reference && photo.stem === masterStem) || null;
 }
 
-function renderComparisonPicker() {}
+function renderComparisonPicker() { }
 
 let comparisonReference = null;
 let comparisonLoadFailed = false;
@@ -2941,7 +3308,7 @@ function redrawCanvases() {
     const referenceName = comparisonReference?.image_name || comparisonReference?.stem;
     const referenceStatus = !comparisonReference ? '沒有其他可比較照片'
         : comparisonLoadFailed ? '參考照片載入失敗'
-        : masterImgObj ? referenceName : '正在載入參考照片…';
+            : masterImgObj ? referenceName : '正在載入參考照片…';
     const masterCaption = document.getElementById('masterCanvasCaption');
     masterCaption.textContent = referenceStatus;
     masterCaption.title = referenceStatus;
@@ -3097,18 +3464,21 @@ function getBoxResizeHandles(bx, by, bw, bh) {
     return handles;
 }
 
-function drawBoxesOnContext(ctx, boxes, W, H, highlightIdx) {
+function drawBoxesOnContext(ctx, boxes, W, H, highlightIdx, options = {}) {
+    const compact = Boolean(options?.compact);
     boxes.forEach((b, idx) => {
+        if (!b || ![b.xc, b.yc, b.w, b.h].every(Number.isFinite)) return;
         const bw = b.w * W;
         const bh = b.h * H;
         const bx = (b.xc * W) - (bw / 2);
         const by = (b.yc * H) - (bh / 2);
         const isSel = idx === highlightIdx;
-        const color = isSel ? '#F08A4C' : CLASS_COLORS[b.class_id % CLASS_COLORS.length];
+        const cidIdx = ((parseInt(b.class_id, 10) || 0) % CLASS_COLORS.length + CLASS_COLORS.length) % CLASS_COLORS.length;
+        const color = isSel ? '#F08A4C' : CLASS_COLORS[cidIdx];
 
         ctx.save();
         ctx.strokeStyle = color;
-        ctx.lineWidth = isSel ? 3 : 2;
+        ctx.lineWidth = isSel ? 3 : (compact ? 1.8 : 2);
         ctx.strokeRect(bx, by, bw, bh);
 
         ctx.fillStyle = color;
@@ -3118,15 +3488,18 @@ function drawBoxesOnContext(ctx, boxes, W, H, highlightIdx) {
 
         // 標籤文字背景
         const labelStr = `#${idx + 1} ${b.class_name}`;
-        ctx.font = 'bold 17px "Microsoft JhengHei", sans-serif';
-        const textW = ctx.measureText(labelStr).width + 10;
-        const labelHeight = 25;
+        ctx.font = compact
+            ? 'bold 12px "Microsoft JhengHei", sans-serif'
+            : 'bold 17px "Microsoft JhengHei", sans-serif';
+        const padX = compact ? 8 : 10;
+        const textW = ctx.measureText(labelStr).width + padX;
+        const labelHeight = compact ? 19 : 25;
         const labelY = Math.max(labelHeight, by);
         ctx.fillStyle = color;
         const labelX = Math.max(0, Math.min(bx, W - textW));
         ctx.fillRect(labelX, labelY - labelHeight, textW, labelHeight);
         ctx.fillStyle = isSel ? '#17232A' : '#FFFFFF';
-        ctx.fillText(labelStr, labelX + 5, labelY - 5, Math.max(1, W - 10));
+        ctx.fillText(labelStr, labelX + (compact ? 4 : 5), labelY - (compact ? 5 : 5), Math.max(1, W - 10));
 
         // 選取框的 8 點縮放控制點（四角 + 上下左右四邊中點）
         if (isSel) {
@@ -3596,7 +3969,7 @@ function syncItemLocalDraftState(item) {
                 code: 'COORD_ABNORMAL',
                 blocking: true,
                 reason: '標記框座標超出正常範圍 [0, 1]',
-                suggestion: '請於畫布重新調整或刪除異常標記框。',
+                suggestion: '請在照片區重新調整或刪除異常標記框。',
                 message: '標記框座標超出正常範圍 [0, 1]'
             });
         }
@@ -3694,6 +4067,9 @@ function applySingleSavePatch(data) {
     }
     if ('shared_classes_active' in data && scanData.shared_classes_info) {
         scanData.shared_classes_info.active = Boolean(data.shared_classes_active);
+    }
+    if ('needs_classes_sync' in data) {
+        scanData.needs_classes_sync = Boolean(data.needs_classes_sync);
     }
     if (data.last_backup) {
         scanData.last_backup = data.last_backup;
@@ -3802,7 +4178,7 @@ function pasteBoxesFromPreviousPhoto() {
     selectedBoxIndex = -1;
     isDrawBoxMode = false;
     markCanvasDraftDirty(curItem, snap);
-    showToast(`已貼上前一張（${prevItem.image_name || prevItem.stem}）的 ${copiedBoxes.length} 個標記框`, 'success');
+    showToast(`已貼上 ${copiedBoxes.length} 個框`, 'success');
     return true;
 }
 
@@ -3818,7 +4194,7 @@ async function saveCanvasBoxesToDisk(stem, boxes, options = {}) {
         boxes: JSON.parse(JSON.stringify(boxes)),
         confirm: confirmAfterSave
     };
-    updateSaveIndicator('saving', confirmAfterSave ? '[...] 儲存並確認中' : '[...] 儲存中');
+    updateSaveIndicator('saving', confirmAfterSave ? '儲存並確認中' : '儲存中');
 
     activeSavePromise = (async () => {
         try {
@@ -3863,7 +4239,7 @@ async function saveCanvasBoxesToDisk(stem, boxes, options = {}) {
             if (workspace !== scanData?.workspace_id) return false;
             isSavingCanvas = false;
             lastSaveFailed = true;
-            updateSaveIndicator('error', '[✕] 儲存失敗（點擊重試）');
+            updateSaveIndicator('error', '儲存失敗（點擊重試）');
             showToast(`儲存標記檔失敗：${err.message}`, 'error');
             return false;
         }
@@ -3932,7 +4308,7 @@ async function confirmCurrentAndNextInternal() {
     }
 
     const allowEmpty = (item.box_count === 0);
-    updateSaveIndicator('saving', '[...] 正在儲存確認狀態');
+    updateSaveIndicator('saving', '正在儲存確認狀態');
 
     try {
         const res = await workspaceFetch('/api/update_review_state', {
@@ -4100,8 +4476,8 @@ async function setCurrentAsMaster() {
 function initKeyboardShortcuts() {
     window.addEventListener('keydown', (e) => {
         // 1. 避免長按重複觸發 (防止長按 C 連續確認多張照片)
-        if (handleModalKey(e)) return;
         if (typeof handleGuidedTourKey === 'function' && handleGuidedTourKey(e)) return;
+        if (handleModalKey(e)) return;
         if (e.isComposing) return;
 
         const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
@@ -4114,7 +4490,6 @@ function initKeyboardShortcuts() {
             if (e.repeat) return;
             const undoBtn = document.getElementById('btnQuickUndo');
             if (!undoBtn || undoBtn.disabled) {
-                showToast('目前沒有可還原的操作', 'info');
                 return;
             }
             if (typeof isSavingCanvas !== 'undefined' && isSavingCanvas) {
@@ -4137,9 +4512,14 @@ function initKeyboardShortcuts() {
         if (e.repeat) return;
         if (e.ctrlKey || e.metaKey || e.altKey) return;
 
-        // 2. 在輸入框、下拉選單或彈窗開啟時不觸發畫布快捷鍵
-        if (isEditableTarget ||
-            ((e.key === ' ' || e.key === 'Enter') && (tag === 'BUTTON' || tag === 'SUMMARY'))) {
+        // 2. 在輸入框、下拉選單或彈窗開啟時不觸發畫布快捷鍵；
+        //    在標記檢視作業區內，焦點停於清單項目或工具按鈕時，仍允許以 Space 立即設為參考照片
+        const inHeaderOrNav = Boolean(e.target?.closest?.('.app-header, .workspace-nav'));
+        const keepNativeControlKey =
+            isEditableTarget ||
+            (e.key === 'Enter' && (tag === 'BUTTON' || tag === 'SUMMARY')) ||
+            (e.key === ' ' && (tag === 'SUMMARY' || (tag === 'BUTTON' && (currentStep !== 'review' || inHeaderOrNav))));
+        if (keepNativeControlKey) {
             return;
         }
 
@@ -4256,9 +4636,10 @@ function handleModalKey(event) {
 }
 
 function openModal(modalId) {
-    if (modalId === 'remapModal' && dirtyCanvasStem) {
+    hideCopyPhotoHoverPreview();
+    if ((modalId === 'remapModal' || modalId === 'trainCheckModal') && dirtyCanvasStem) {
         flushUnsavedCanvasDraftIfNeeded().then(ok => {
-            if (ok) openModal('remapModal');
+            if (ok) openModal(modalId);
         });
         return;
     }
@@ -4269,6 +4650,7 @@ function openModal(modalId) {
     modalOpener = tools?.contains(document.activeElement) ? tools.querySelector('summary') : document.activeElement;
     tools?.removeAttribute('open');
     if (modalId === 'remapModal') renderClassRemapEditor();
+    if (modalId === 'trainCheckModal') loadTrainingReadinessCheck();
     activeModal = modal;
     modal.style.display = 'flex';
     modal.querySelector('.btn-close')?.focus();
@@ -4297,7 +4679,7 @@ function renderClassRemapEditor() {
         const sInfo = scanData.shared_classes_info;
         if (sInfo && sInfo.active) {
             sharedWarnEl.style.display = 'block';
-            sharedWarnEl.innerHTML = `⚠️ 共用模式建議只改名稱；合併或刪除不會同步更新其他資料夾的標記檔。`;
+            sharedWarnEl.innerHTML = `${uiIcon('alert', 'ui-icon-sm')} <span>共用模式：ID 順序變更、合併或刪除僅套用目前資料夾</span>`;
         } else {
             sharedWarnEl.style.display = 'none';
             sharedWarnEl.innerHTML = '';
@@ -4305,9 +4687,9 @@ function renderClassRemapEditor() {
     }
 
     const usedClassIds = new Set();
-    scanData.classes.forEach((_, idx) => usedClassIds.add(idx));
-    scanData.items.forEach(item => {
-        item.boxes.forEach(b => usedClassIds.add(b.class_id));
+    (scanData.classes || []).forEach((_, idx) => usedClassIds.add(idx));
+    (scanData.items || []).forEach(item => {
+        (item.boxes || []).forEach(b => usedClassIds.add(b.class_id));
     });
 
     const sortedIds = Array.from(usedClassIds).sort((a, b) => a - b);
@@ -4319,9 +4701,10 @@ function renderClassRemapEditor() {
         return;
     }
 
-    const nameOf = cid => (cid < scanData.classes.length ? scanData.classes[cid] : '');
-    const boxCountOf = cid => scanData.items.reduce((acc, it) => acc + it.boxes.filter(b => b.class_id === cid).length, 0);
-    const photoCountOf = cid => scanData.items.filter(it => it.boxes.some(b => b.class_id === cid)).length;
+    const nameOf = cid => (cid < (scanData.classes || []).length ? scanData.classes[cid] : '');
+    const boxCountOf = cid => (scanData.items || []).reduce((acc, it) => acc + (it.boxes || []).filter(b => b.class_id === cid).length, 0);
+    const photoCountOf = cid => (scanData.items || []).filter(it => (it.boxes || []).some(b => b.class_id === cid)).length;
+    const canReorder = sortedIds.length >= 2;
 
     const rowsHtml = sortedIds.map(cid => {
         const curName = nameOf(cid);
@@ -4334,16 +4717,19 @@ function renderClassRemapEditor() {
             .join('');
         return `
             <tr class="remap-row" data-orig-id="${cid}" data-box-count="${boxCnt}" data-orig-name="${escapeHtml(curName)}" data-action="keep">
+                <td class="remap-col-order">
+                    <button type="button" class="remap-drag-handle"${canReorder ? '' : ' disabled'} aria-label="拖曳或使用上下方向鍵調整類別 ${cid} 順序" title="拖曳調整順序">${uiIcon('grip', 'ui-icon-sm')}</button>
+                </td>
                 <td class="remap-col-class">
                     <div class="remap-class-cell">
                         <span class="remap-id-badge">ID ${cid}</span>
-                        <span class="remap-cur-name" title="${escapeHtml(curName || '未定義名稱')}">${curName ? `<strong>${escapeHtml(curName)}</strong>` : '<span class="text-red">[!] 未定義名稱</span>'}</span>
+                        <span class="remap-cur-name" title="${escapeHtml(curName || '未定義名稱')}">${curName ? `<strong>${escapeHtml(curName)}</strong>` : '<span class="text-red">未定義名稱</span>'}</span>
                     </div>
                 </td>
                 <td class="remap-col-count"><strong>${boxCnt}</strong> 個框 <span class="muted-text">(${photoCnt} 張照片)</span></td>
                 <td class="remap-col-action">
                     <div class="remap-action-seg" role="group" aria-label="類別 ${cid} 的處理動作">
-                        <button type="button" class="remap-seg-btn active" data-act="keep" aria-pressed="true" onclick="setRemapRowAction(this, 'keep')">改名／保留</button>
+                        <button type="button" class="remap-seg-btn active" data-act="keep" aria-pressed="true" onclick="setRemapRowAction(this, 'keep')">改名</button>
                         <button type="button" class="remap-seg-btn" data-act="merge" aria-pressed="false"${canMerge ? '' : ' disabled title="至少需有 2 個類別才能合併"'} onclick="setRemapRowAction(this, 'merge')">合併</button>
                         <button type="button" class="remap-seg-btn remap-seg-danger" data-act="delete" aria-pressed="false" onclick="setRemapRowAction(this, 'delete')">刪除</button>
                     </div>
@@ -4372,6 +4758,7 @@ function renderClassRemapEditor() {
         <table class="data-table remap-table">
             <thead>
                 <tr>
+                    <th class="remap-col-order">順序</th>
                     <th class="remap-col-class">目前類別</th>
                     <th class="remap-col-count">標記框數量</th>
                     <th class="remap-col-action">選擇要執行的動作</th>
@@ -4381,11 +4768,120 @@ function renderClassRemapEditor() {
             <tbody>${rowsHtml}</tbody>
         </table>
     `;
+    bindClassRemapDragReorder(wrap);
     validatedRemapPayload = null;
     wrap.oninput = () => { updateRemapSummary(); scheduleRemapPreview(); };
     wrap.onchange = () => { updateRemapSummary(); scheduleRemapPreview(); };
     updateRemapSummary();
     scheduleRemapPreview();
+}
+
+function getRemapRowOrderSignature(tbody) {
+    return Array.from(tbody?.querySelectorAll('tr.remap-row') || [])
+        .map(tr => tr.dataset.origId)
+        .join(',');
+}
+
+function moveRemapRow(tr, delta) {
+    const tbody = tr?.parentElement;
+    if (!tbody || !delta) return false;
+    const rows = Array.from(tbody.querySelectorAll('tr.remap-row'));
+    const idx = rows.indexOf(tr);
+    const nextIdx = idx + delta;
+    if (idx < 0 || nextIdx < 0 || nextIdx >= rows.length) return false;
+    const refNode = delta > 0 ? rows[nextIdx].nextSibling : rows[nextIdx];
+    tbody.insertBefore(tr, refNode);
+    tr.querySelector('.remap-drag-handle')?.focus();
+    updateRemapSummary();
+    scheduleRemapPreview();
+    return true;
+}
+
+function bindClassRemapDragReorder(wrap) {
+    const tbody = wrap?.querySelector('.remap-table tbody');
+    if (!tbody) return;
+
+    let draggedRow = null;
+    let startOrder = '';
+
+    const resetDraggable = () => {
+        tbody.querySelectorAll('tr.remap-row').forEach(r => {
+            r.draggable = false;
+            r.classList.remove('is-dragging');
+        });
+    };
+
+    tbody.addEventListener('pointerdown', (e) => {
+        const handle = e.target?.closest?.('.remap-drag-handle');
+        if (!handle || handle.disabled) return;
+        const row = handle.closest('tr.remap-row');
+        if (row) row.draggable = true;
+    });
+
+    tbody.addEventListener('pointerup', () => {
+        if (!draggedRow) resetDraggable();
+    });
+
+    tbody.addEventListener('dragstart', (e) => {
+        const row = e.target?.closest?.('tr.remap-row');
+        if (!row || !row.draggable) {
+            e.preventDefault();
+            return;
+        }
+        draggedRow = row;
+        startOrder = getRemapRowOrderSignature(tbody);
+        row.classList.add('is-dragging');
+        if (e.dataTransfer) {
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', row.dataset.origId || '');
+        }
+    });
+
+    tbody.addEventListener('dragover', (e) => {
+        if (!draggedRow) return;
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+        const targetRow = e.target?.closest?.('tr.remap-row');
+        if (!targetRow || targetRow === draggedRow) return;
+
+        const rect = targetRow.getBoundingClientRect();
+        const insertBefore = e.clientY < (rect.top + rect.height / 2);
+        const refNode = insertBefore ? targetRow : targetRow.nextSibling;
+        if (draggedRow.nextSibling !== refNode) {
+            tbody.insertBefore(draggedRow, refNode);
+            updateRemapSummary();
+        }
+    });
+
+    tbody.addEventListener('drop', (e) => {
+        if (!draggedRow) return;
+        e.preventDefault();
+    });
+
+    tbody.addEventListener('dragend', () => {
+        if (!draggedRow) return;
+        const changed = getRemapRowOrderSignature(tbody) !== startOrder;
+        draggedRow = null;
+        resetDraggable();
+        if (changed) {
+            updateRemapSummary();
+            scheduleRemapPreview();
+        }
+    });
+
+    tbody.addEventListener('keydown', (e) => {
+        const handle = e.target?.closest?.('.remap-drag-handle');
+        if (!handle || handle.disabled) return;
+        const row = handle.closest('tr.remap-row');
+        if (!row) return;
+        if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            moveRemapRow(row, -1);
+        } else if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            moveRemapRow(row, 1);
+        }
+    });
 }
 
 function setRemapRowAction(btnEl, action) {
@@ -4428,7 +4924,7 @@ function scheduleRemapPreview() {
 
 /**
  * 依使用者在表格中的選擇，計算類別修正方案：
- * - 改名／保留：維持類別（可改名稱）
+ * - 改名：保留此類別並可更改名稱或拖曳排序
  * - 合併到其他類別：此類別的標記框改歸入目標類別，原類別編號移除
  * - 刪除此類別：移除此類別的所有標記框
  * classes.txt 的編號必須連續，因此保留下來的類別會依原順序自動重新編號。
@@ -4530,7 +5026,7 @@ function updateRemapSummary() {
     });
     if (!plan.ok) {
         box.className = 'remap-result has-error';
-        box.innerHTML = plan.errors.map(e => `<div>[✕] ${escapeHtml(e)}</div>`).join('');
+        box.innerHTML = plan.errors.map(e => `<div class="issue-diag-row">${uiIcon('x-circle', 'ui-icon-xs')}<span>${escapeHtml(e)}</span></div>`).join('');
     } else {
         box.className = 'remap-result';
         const list = plan.new_classes.map((n, i) => `<span class="remap-final-item"><span class="remap-final-id">ID ${i}</span> <strong>${escapeHtml(n)}</strong></span>`).join('');
@@ -4539,8 +5035,7 @@ function updateRemapSummary() {
     const execBtn = document.getElementById('btnExecRemap');
     if (execBtn) execBtn.disabled = !plan.ok || !plan.hasChanges;
     if (!plan.hasChanges && plan.ok) {
-        document.getElementById('classRemapPreviewBox').innerHTML =
-            '<span class="muted-text">尚未變更任何設定。可直接修改「名稱」輸入框改名，或點選「合併到其他類別」、「刪除此類別」。</span>';
+        document.getElementById('classRemapPreviewBox').innerHTML = '';
     }
 }
 
@@ -4575,7 +5070,7 @@ async function previewClassRemapOperation(options = {}) {
         }
         const p = data.preview;
         document.getElementById('classRemapPreviewBox').innerHTML = `
-            <div><strong>預計影響範圍：</strong>將更新 <strong>${p.affected_files_count}</strong> 個標記檔（轉移 <strong>${p.remapped_boxes_count}</strong> 框 · 刪除 <strong>${p.deleted_boxes_count}</strong> 框） · 修改名稱 <strong>${p.rename_only_classes.length}</strong> 項（執行前會自動建立備份，隨時可按 Ctrl+Z 還原）</div>`;
+            <div><strong>預計影響範圍：</strong>將更新 <strong>${p.affected_files_count}</strong> 個標記檔（轉移 <strong>${p.remapped_boxes_count}</strong> 框 · 刪除 <strong>${p.deleted_boxes_count}</strong> 框） · 修改名稱 <strong>${p.rename_only_classes.length}</strong> 項</div>`;
         validatedRemapPayload = fingerprint;
         document.getElementById('btnExecRemap').disabled = false;
         return true;
@@ -4617,7 +5112,7 @@ async function executeClassRemapOperation() {
             renderInspectorAndCanvas();
         }
         closeModal('remapModal');
-        showToast(`類別修正完成（更新 ${data.results.modified_files_count} 個標記檔），已自動建立備份。`, 'success');
+        showToast(`已更新 ${data.results.modified_files_count} 個標記檔`, 'success');
     } catch (error) {
         showToast(error.message, 'error');
     } finally {
@@ -4650,7 +5145,6 @@ async function handleUndoLast() {
             renderLoadStepSummary();
             renderStudioFileList();
             renderInspectorAndCanvas();
-            showToast('已還原畫布微調', 'info');
             return;
         }
     }
@@ -4684,11 +5178,281 @@ async function handleUndoLast() {
             renderStudioFileList();
             renderInspectorAndCanvas();
         }
-        showToast(`[✓] ${data.message}`, 'success');
+        showToast(`${data.message}`, 'success');
     } catch (e) {
         showToast('執行還原時發生錯誤', 'error');
     } finally {
         undoInProgress = false;
+    }
+}
+
+// ============================================================================
+// 訓練前檢查與一鍵清理／同步
+// ============================================================================
+let trainingCheckBusy = false;
+
+async function loadTrainingReadinessCheck() {
+    const bannerEl = document.getElementById('trainCheckSummaryBanner');
+    const listEl = document.getElementById('trainCheckList');
+    const fixAllBtn = document.getElementById('btnTrainFixAll');
+    if (!bannerEl || !listEl) return;
+    if (!scanData || !scanData.ok) {
+        bannerEl.className = 'train-check-banner warn';
+        bannerEl.textContent = '請先載入照片資料夾';
+        listEl.innerHTML = '';
+        if (fixAllBtn) fixAllBtn.disabled = true;
+        return;
+    }
+
+    bannerEl.className = 'train-check-banner warn';
+    bannerEl.textContent = '正在檢查資料夾與標記檔案狀態…';
+    listEl.innerHTML = '';
+    if (fixAllBtn) fixAllBtn.disabled = true;
+
+    try {
+        const res = await workspaceFetch('/api/training_check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'inspect' })
+        });
+        const data = await res.json();
+        if (!data.ok || !data.readiness) {
+            bannerEl.className = 'train-check-banner error';
+            bannerEl.textContent = data.error || '無法執行訓練前檢查';
+            return;
+        }
+        renderTrainingCheckModal(data.readiness);
+    } catch (_) {
+        bannerEl.className = 'train-check-banner error';
+        bannerEl.textContent = '檢查失敗，請稍後再試';
+    }
+}
+
+function buildTrainCheckRowHtml(level, title, detail, actions = []) {
+    const iconName = level === 'ok' ? 'check-circle' : (level === 'error' ? 'x-circle' : 'alert');
+    const iconHtml = `<span class="train-check-icon">${uiIcon(iconName, 'ui-icon')}</span>`;
+    const actionsHtml = actions.map(act =>
+        `<button type="button" class="btn ${act.cls || 'btn-secondary btn-sm'}" onclick="${act.onclick}" ${trainingCheckBusy ? 'disabled' : ''}>${escapeHtml(act.label)}</button>`
+    ).join('');
+    const detailHtml = detail ? `<div class="train-check-detail">${escapeHtml(detail)}</div>` : '';
+    return `
+        <div class="train-check-row ${level}">
+            <div class="train-check-info">
+                <div class="train-check-title">${iconHtml}<span>${escapeHtml(title)}</span></div>
+                ${detailHtml}
+            </div>
+            ${actionsHtml ? `<div class="train-check-actions">${actionsHtml}</div>` : ''}
+        </div>
+    `;
+}
+
+function renderTrainingCheckModal(r) {
+    const bannerEl = document.getElementById('trainCheckSummaryBanner');
+    const listEl = document.getElementById('trainCheckList');
+    const fixAllBtn = document.getElementById('btnTrainFixAll');
+    if (!bannerEl || !listEl) return;
+
+    if (scanData && scanData.ok) {
+        scanData.legacy_workspace_exists = Boolean(r.legacy_workspace_exists);
+        scanData.needs_classes_sync = Boolean(r.needs_classes_sync);
+    }
+    updateTrainCheckButtonVisual(r);
+
+    if (fixAllBtn) {
+        fixAllBtn.disabled = trainingCheckBusy || !(r.can_auto_fix_count > 0);
+    }
+
+    const blockingCnt = (r.blocking_error_stems || []).length;
+    if (r.ready && !r.has_warnings) {
+        bannerEl.className = 'train-check-banner ready';
+        bannerEl.innerHTML = `${uiIcon('check-circle')}<span>可用於訓練（${r.photo_count} 張照片 · ${r.classes_count} 個類別）</span>`;
+    } else if (blockingCnt > 0 || r.missing_classes_for_boxes) {
+        bannerEl.className = 'train-check-banner error';
+        bannerEl.innerHTML = `${uiIcon('x-circle')}<span>有阻擋性問題，需先修正</span>`;
+    } else if (r.ready) {
+        bannerEl.className = 'train-check-banner warn';
+        bannerEl.innerHTML = `${uiIcon('alert')}<span>有提醒項目</span>`;
+    } else {
+        bannerEl.className = 'train-check-banner warn';
+        bannerEl.innerHTML = `${uiIcon('alert')}<span>尚有未處理項目</span>`;
+    }
+
+    const rows = [];
+
+    // 1. classes.txt 檢查（涵蓋共用模式未同步到子資料夾）
+    if (r.missing_classes_for_boxes) {
+        rows.push(buildTrainCheckRowHtml(
+            'error',
+            '缺少類別定義檔 (classes.txt)',
+            '',
+            [{ label: '設定類別檔', cls: 'btn btn-primary btn-sm', onclick: "closeModal('trainCheckModal'); openSharedClassesSetupModalManually();" }]
+        ));
+    } else if (r.needs_classes_sync) {
+        const syncDesc = r.classes_in_folder_exists ? '與共用類別不一致' : '';
+        rows.push(buildTrainCheckRowHtml(
+            'warn',
+            '資料夾內尚未同步 classes.txt',
+            syncDesc,
+            [{ label: '同步寫入此資料夾', cls: 'btn btn-primary btn-sm', onclick: "runTrainingFix(['sync_classes'])" }]
+        ));
+    } else {
+        rows.push(buildTrainCheckRowHtml(
+            'ok',
+            '資料夾內 classes.txt 已同步',
+            ''
+        ));
+    }
+
+    // 2. 舊版 _yolo_batch_workspace 檢查
+    if (r.legacy_workspace_exists) {
+        rows.push(buildTrainCheckRowHtml(
+            'warn',
+            '偵測到舊版 _yolo_batch_workspace 資料夾',
+            '清理前會保留確認進度',
+            [{ label: '一鍵清理', cls: 'btn btn-primary btn-sm', onclick: "runTrainingFix(['clean_legacy_workspace'])" }]
+        ));
+    } else {
+        rows.push(buildTrainCheckRowHtml(
+            'ok',
+            '資料夾純淨（無存有子資料夾）',
+            ''
+        ));
+    }
+
+    // 3. 標記完整度（阻擋錯誤 / 未標記 / 已配對）
+    if (blockingCnt > 0) {
+        rows.push(buildTrainCheckRowHtml(
+            'error',
+            `${blockingCnt} 張照片有阻擋性錯誤`,
+            '包含格式錯誤、類別超範圍、損毀或同名照片衝突。',
+            [{ label: '前往修正', cls: 'btn btn-primary btn-sm', onclick: "jumpFromTrainCheck('pending_review')" }]
+        ));
+    }
+    if (r.unlabeled_count > 0) {
+        rows.push(buildTrainCheckRowHtml(
+            'warn',
+            `${r.unlabeled_count} 張照片尚未建立 .txt（未標記）`,
+            '',
+            [{ label: '查看未標記照片', cls: 'btn btn-secondary btn-sm', onclick: "jumpFromTrainCheck('unlabeled')" }]
+        ));
+    } else if (blockingCnt === 0) {
+        rows.push(buildTrainCheckRowHtml(
+            'ok',
+            '全部照片皆已有標記配對',
+            `共 ${r.photo_count} 張照片 · 已確認 ${r.confirmed_count} 張`,
+            r.pending_review_count > 0 ? [{ label: '查看待確認', cls: 'btn btn-secondary btn-sm', onclick: "jumpFromTrainCheck('pending_review')" }] : []
+        ));
+    }
+
+    // 4. 孤立 .txt 與邊緣超出框 / 其他提醒
+    const orphanCnt = (r.orphan_label_stems || []).length;
+    if (orphanCnt > 0) {
+        const preview = r.orphan_label_stems.slice(0, 3).join('、') + (orphanCnt > 3 ? ` 等 ${orphanCnt} 筆` : '');
+        rows.push(buildTrainCheckRowHtml(
+            'warn',
+            `${orphanCnt} 個找不到對應照片的孤立 .txt`,
+            `檔案：${preview}`,
+            [{ label: '一鍵刪除孤立檔', cls: 'btn btn-secondary btn-sm', onclick: "runTrainingFix(['clean_orphans'])" }]
+        ));
+    }
+
+    const edgeCnt = (r.edge_oob_stems || []).length;
+    if (edgeCnt > 0) {
+        rows.push(buildTrainCheckRowHtml(
+            'warn',
+            `${edgeCnt} 張標記框邊緣略微超出 [0, 1]`,
+            '',
+            [{ label: '裁切回 [0, 1]', cls: 'btn btn-secondary btn-sm', onclick: "runTrainingFix(['clamp_edge_boxes'])" }]
+        ));
+    }
+
+    const dupCnt = (r.duplicate_box_stems || []).length;
+    const tinyCnt = (r.tiny_box_stems || []).length;
+    const exifCnt = (r.exif_rotation_stems || []).length;
+    if (dupCnt > 0 || tinyCnt > 0 || exifCnt > 0) {
+        const parts = [];
+        if (dupCnt > 0) parts.push(`重複疊框 ${dupCnt} 張`);
+        if (tinyCnt > 0) parts.push(`極小框 ${tinyCnt} 張`);
+        if (exifCnt > 0) parts.push(`帶 EXIF 旋轉標籤 ${exifCnt} 張`);
+        rows.push(buildTrainCheckRowHtml(
+            'warn',
+            '標記內容提醒',
+            parts.join(' · '),
+            [{ label: '前往檢查', cls: 'btn btn-secondary btn-sm', onclick: "jumpFromTrainCheck('all')" }]
+        ));
+    }
+
+    listEl.innerHTML = rows.join('');
+}
+
+async function runTrainingFix(actions) {
+    if (trainingCheckBusy || !scanData || !scanData.ok) return;
+    trainingCheckBusy = true;
+    let latestReadiness = null;
+    try {
+        // 若目前使用共用檔且執行 sync_classes，先保留當前資料夾的共用綁定以免切回單資料夾模式
+        if (scanData.shared_classes_info?.active && scanData.image_dir &&
+            (actions.includes('fix_all') || actions.includes('sync_classes'))) {
+            if (!window.YoloWebEngine?.isActive()) {
+                const cfg = loadLocalSharedClassesCfg();
+                const boundSet = new Set(cfg.boundWorkspaces || []);
+                boundSet.add(scanData.image_dir);
+                saveLocalSharedClassesCfg({ ...cfg, boundWorkspaces: Array.from(boundSet) });
+            } else {
+                await fetch('/api/shared_classes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'bind_workspaces', bind_current: true })
+                });
+            }
+        }
+
+        const res = await workspaceFetch('/api/training_check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'fix', actions })
+        });
+        const data = await res.json();
+        if (!data.ok) {
+            showToast(data.error || '訓練前整理失敗', 'error');
+            return;
+        }
+        latestReadiness = data.readiness || null;
+        if (data.scan && data.scan.ok) {
+            scanData = data.scan;
+            updateHeaderAndNavBadges();
+            renderLoadStepSummary();
+            if (currentStep === 'apply') renderBatchApplyStep();
+            if (currentStep === 'review') {
+                ensureValidActiveItemForReview();
+                renderStudioFileList();
+                renderInspectorAndCanvas();
+            }
+        }
+        const f = data.fixed || {};
+        const doneMsgs = [];
+        if (f.classes_synced) doneMsgs.push('已同步 classes.txt');
+        if (f.legacy_removed) doneMsgs.push('已清理舊暫存資料夾');
+        if (f.orphans_removed > 0) doneMsgs.push(`已刪 ${f.orphans_removed} 個孤立檔`);
+        if (f.clamped_files > 0) doneMsgs.push(`已裁切 ${f.clamped_files} 檔邊界框`);
+        showToast(doneMsgs.length > 0 ? doneMsgs.join(' · ') : '目前無需整理項目', 'success');
+    } catch (_) {
+        showToast('執行訓練前整理時發生錯誤', 'error');
+    } finally {
+        trainingCheckBusy = false;
+        if (latestReadiness) {
+            renderTrainingCheckModal(latestReadiness);
+        }
+    }
+}
+
+function jumpFromTrainCheck(filterName) {
+    closeModal('trainCheckModal');
+    if (currentStep !== 'review') {
+        switchStep('review');
+    }
+    if (filterName) {
+        applyQuickFilter(filterName);
     }
 }
 
@@ -4723,102 +5487,34 @@ function escapeJsStr(str) {
 }
 
 // ============================================================================
-// 互動式動態操作指引（Interactive Guided Tour）系統
-// - 分別管理「照片載入後 (post_load)」與「批次套用 (batch_apply)」每日首次提示狀態
-// - 優先使用瀏覽器 LocalStorage 記錄當日 YYYY-MM-DD 狀態（重整頁面仍保留，隔日自動恢復）
-// - 結合動態聚光燈遮罩 (Spotlight Cutout)、智慧防遮擋定位與內嵌微動畫操作示範
+// 互動式動態操作指引（僅由頁首「操作指引」按鈕手動開啟，無自動彈窗）
 // ============================================================================
-const TOUR_STORAGE_PREFIX = 'yolo_guided_tour_daily_';
 let activeTourType = null;
 let activeTourStepIdx = 0;
-let pendingPromptTourType = null;
-let isTourInternalStepSwitch = false;
 let tourSavedCleanupCallbacks = [];
 let tourRepositionRaf = null;
-
-function getTodayLocalDateKey() {
-    const d = new Date();
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-}
-
-function getTourDailyState(tourType) {
-    try {
-        const raw = localStorage.getItem(TOUR_STORAGE_PREFIX + tourType);
-        if (!raw) return null;
-        const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== 'object') return null;
-        return parsed;
-    } catch (_) {
-        return null;
-    }
-}
-
-function setTourDailyState(tourType, action) {
-    const today = getTodayLocalDateKey();
-    try {
-        const prev = getTourDailyState(tourType);
-        const keepHideToday = (prev && prev.date === today && prev.hide_today) || action === 'hide_today';
-        const record = {
-            date: today,
-            prompted: true,
-            hide_today: Boolean(keepHideToday),
-            last_action: action,
-            updated_at: Date.now()
-        };
-        localStorage.setItem(TOUR_STORAGE_PREFIX + tourType, JSON.stringify(record));
-    } catch (_) {}
-}
-
-function shouldAutoPromptTour(tourType) {
-    const today = getTodayLocalDateKey();
-    const state = getTourDailyState(tourType);
-    if (!state || state.date !== today) {
-        return true;
-    }
-    if (state.hide_today || state.prompted) {
-        return false;
-    }
-    return true;
-}
-
-function resetGuidedTourDailyState() {
-    try {
-        localStorage.removeItem(TOUR_STORAGE_PREFIX + 'post_load');
-        localStorage.removeItem(TOUR_STORAGE_PREFIX + 'batch_apply');
-    } catch (_) {}
-    closeModal('guidedTourLauncherModal');
-    showToast('已重設今日操作指引提示狀態，下次載入照片或進入批次套用時將再次詢問。', 'success');
-}
+let tourOpenerEl = null;
+let tourRenderToken = 0;
 
 const GUIDED_TOUR_CONFIGS = {
     post_load: {
         categoryLabel: '標記檢視指引',
-        promptBadge: '操作指引',
-        promptTitle: '照片已載入，要開始操作指引嗎？',
-        promptDesc: '只要 30 秒，帶您快速掌握 3 個核心操作：',
-        promptPoints: [
-            '切換功能區與篩選待處理照片',
-            '在畫布新增、拖曳調整標記框與使用放大鏡',
-            '按 C 確認標記並自動換下一張'
-        ],
         steps: [
             {
                 stepTarget: 'review',
                 selector: '.workspace-nav',
                 pulseTag: '步驟 1 · 切換功能區',
                 title: '1. 切換功能區',
-                desc: '點選上方按鈕，即可切換「標記檢視」、「批次套用」與「類別修正」。',
-                tip: '💡 做錯任何操作，都可點右上角「↩ 還原上一步 (Ctrl+Z)」復原。',
+                desc: '點選上方頁籤與右側工具按鈕，即可切換「標記檢視」、「批次套用」、「訓練前檢查」與「類別修正」。',
+                tipType: 'info',
+                tip: '若需復原上一步操作，可點選頁首「還原上一步」或按 Ctrl+Z。',
                 demoHtml: `
-                    <div class="tour-demo-header"><span>▶ 操作示範：點擊按鈕切換功能</span><span>即時顯示待處理數</span></div>
+                    <div class="tour-demo-header"><span>操作示範 · 切換功能區</span><span>即時顯示待處理數</span></div>
                     <div class="tour-demo-visual">
                         <div class="demo-pill-row">
                             <span class="demo-pill highlight-pulse">標記檢視 (待確認)</span>
                             <span class="demo-pill">批次套用 (未標記)</span>
-                            <span class="demo-pill">類別修正</span>
+                            <span class="demo-pill">訓練前檢查</span>
                         </div>
                     </div>
                 `
@@ -4828,8 +5524,9 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '#reviewLeftSidebar',
                 pulseTag: '步驟 2 · 篩選與選擇照片',
                 title: '2. 篩選與選擇照片',
-                desc: '點選上方標籤可篩選「未標記」或「待確認」的照片，點擊清單即可切換照片。',
-                tip: '💡 也可在搜尋框輸入檔名快速查找。',
+                desc: '點選左側上方的狀態按鈕（如「未標記」、「待確認」），即可篩選出該類照片；點一下清單中的照片名稱即可切換畫面。',
+                tipType: 'info',
+                tip: '也可直接在搜尋欄輸入檔名快速查找。',
                 onEnter() {
                     const leftBar = document.getElementById('reviewLeftSidebar');
                     if (leftBar && leftBar.classList.contains('collapsed')) {
@@ -4838,12 +5535,12 @@ const GUIDED_TOUR_CONFIGS = {
                     }
                 },
                 demoHtml: `
-                    <div class="tour-demo-header"><span>▶ 操作示範：點選標籤快速篩選</span><span>點擊清單切換照片</span></div>
+                    <div class="tour-demo-header"><span>操作示範 · 篩選與切換</span><span>點擊清單顯示照片</span></div>
                     <div class="tour-demo-visual">
                         <div class="demo-pill-row">
                             <span class="demo-pill">全部</span>
                             <span class="demo-pill">未標記</span>
-                            <span class="demo-pill highlight-pulse">待確認 ✓</span>
+                            <span class="demo-pill highlight-pulse">待確認</span>
                             <span class="demo-pill">已確認</span>
                         </div>
                     </div>
@@ -4854,10 +5551,11 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '#canvasViewport',
                 pulseTag: '步驟 3 · 調整標記框',
                 title: '3. 拖曳與微調標記框',
-                desc: '點擊標記框可拖曳移動，或拉動周圍白點調整大小；調整完按 C 確認並儲存。',
-                tip: '💡 按方向鍵 ↑↓←→ 可每次移動 1 像素；直接換張會自動存成草稿。',
+                desc: '點擊標記框可拖曳移動，或拉動周圍白點調整尺寸；確認無誤後按 C 確認並儲存。',
+                tipType: 'info',
+                tip: '使用鍵盤方向鍵可每次微調 1 像素（搭配 Shift 為 10 像素）；切張前系統會自動保存草稿。',
                 demoHtml: `
-                    <div class="tour-demo-header"><span>▶ 操作示範：拖曳與調整框大小</span><span>按 C 確認儲存</span></div>
+                    <div class="tour-demo-header"><span>操作示範 · 拖曳與縮放</span><span>按 C 確認儲存</span></div>
                     <div class="tour-demo-visual">
                         <div class="demo-Resize-box">
                             <span class="demo-handle tl"></span><span class="demo-handle tc"></span><span class="demo-handle tr"></span>
@@ -4872,10 +5570,11 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '.review-mode-bar',
                 pulseTag: '步驟 4 · 比對與放大鏡',
                 title: '4. 並排比較與放大鏡',
-                desc: '點選「並排比較 (V)」可與參考照片對照；開啟「🔍 放大鏡 (M)」可放大檢視框線邊緣。',
-                tip: '💡 按住 Ctrl + 滑鼠滾輪可自由放大或縮小畫面。',
+                desc: '切換「並排比較 (V)」可與參考照片對照；開啟「放大鏡 (M)」可在游標處提供 4 倍局部檢視。',
+                tipType: 'info',
+                tip: '按住 Ctrl + 滑鼠滾輪可自由縮放檢視倍率。',
                 demoHtml: `
-                    <div class="tour-demo-header"><span>▶ 操作示範：游標處 4 倍放大鏡</span><span>快捷鍵 M / V</span></div>
+                    <div class="tour-demo-header"><span>操作示範 · 4 倍細節放大鏡</span><span>快捷鍵 M / V</span></div>
                     <div class="tour-demo-visual">
                         <div class="demo-loupe-circle"></div>
                     </div>
@@ -4886,10 +5585,11 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '#pinnedBoxesSidebar',
                 pulseTag: '步驟 5 · 新增與管理標記框',
                 title: '5. 新增、複製與刪除標記框',
-                desc: '點選「＋ 新增框 (W)」可在畫布拉出新框；選取標記框後可複製 (B)、刪除 (Del) 或更換類別。',
-                tip: '💡 輸入新類別名稱後會馬上存檔；要改名或刪除請點上方「類別修正」。',
+                desc: '點擊「＋ 新增框 (W)」即可直接在照片上拉框；選取標記框後可複製 (B)、刪除 (Del) 或更換所屬類別。',
+                tipType: 'info',
+                tip: '新增類別名稱會立即寫入類別檔；需批次改名、合併或刪除請使用上方「類別修正」。',
                 demoHtml: `
-                    <div class="tour-demo-header"><span>▶ 操作示範：新增、複製與刪除工具</span><span>快捷鍵 W / B / Del</span></div>
+                    <div class="tour-demo-header"><span>操作示範 · 框操作工具</span><span>快捷鍵 W / B / Del</span></div>
                     <div class="tour-demo-visual">
                         <div class="demo-pill-row">
                             <span class="demo-pill highlight-pulse">＋ 新增框 (W)</span>
@@ -4904,15 +5604,16 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '.review-bottom-bar',
                 pulseTag: '步驟 6 · 確認並換張',
                 title: '6. 確認標記並換下一張',
-                desc: '檢查無誤後，點擊「確認並下一張 (C)」即可完成此張並自動跳到下一張。',
-                tip: '💡 點選右側「設為參考 (Space)」，可將此張照片設為批次套用的範本。',
+                desc: '檢查完成後點擊中央「確認並下一張 (C)」，系統會正式確認存檔並跳轉下一張待確認照片。',
+                tipType: 'info',
+                tip: '點選右側「設為參考」（快捷鍵 Space），可將此照片設為批次套用的範本。',
                 demoHtml: `
-                    <div class="tour-demo-header"><span>▶ 操作示範：確認完成並跳下一張</span><span>快捷鍵 A / D / C</span></div>
+                    <div class="tour-demo-header"><span>操作示範 · 確認並切換</span><span>快捷鍵 A / D / C</span></div>
                     <div class="tour-demo-visual">
                         <div class="demo-pill-row">
                             <span class="demo-pill">上一張 (A)</span>
-                            <span class="demo-pill highlight-pulse">[✓] 確認並下一張 (C)</span>
                             <span class="demo-pill">下一張 (D)</span>
+                            <span class="demo-pill highlight-pulse">確認並下一張 (C)</span>
                         </div>
                     </div>
                 `
@@ -4921,28 +5622,21 @@ const GUIDED_TOUR_CONFIGS = {
     },
     batch_apply: {
         categoryLabel: '批次套用指引',
-        promptBadge: '批次套用指引',
-        promptTitle: '要查看「批次套用」操作指引嗎？',
-        promptDesc: '只要 4 個步驟，快速將標記套用到多張相似照片：',
-        promptPoints: [
-            '選擇 1 張已標記的「參考照片」作為範本',
-            '勾選要套用的目標照片並檢查對齊設定',
-            '確認預覽結果並建立標記草稿'
-        ],
         steps: [
             {
                 stepTarget: 'apply',
                 selector: '#referenceSelectorArea',
                 pulseTag: '步驟 1 · 選擇參考照片',
                 title: '1. 選擇「參考照片」',
-                desc: '從下拉選單選擇一張已標記好的照片作為範本，系統會將它的標記框套用到其他照片。',
-                tip: '💡 若還沒有參考照片，請先回「標記檢視」畫好 1 張並點選「設為參考」。',
+                desc: '從下拉選單選取一張已完成標記的照片作為範本，系統會將其標記框套用至選取的目標照片。',
+                tipType: 'info',
+                tip: '若目前尚無可用參考照片，請先至「標記檢視」完成至少一張有效標記並設為參考。',
                 demoHtml: `
-                    <div class="tour-demo-header"><span>▶ 操作示範：選擇已標記的照片作為範本</span><span>複製來源</span></div>
+                    <div class="tour-demo-header"><span>操作示範 · 選取範本來源</span><span>參考照片</span></div>
                     <div class="tour-demo-visual">
                         <div class="demo-pill-row">
-                            <span class="demo-pill highlight-pulse">★ 參考照片</span>
-                            <span class="demo-pill">➔ 提供標記框範本</span>
+                            <span class="demo-pill highlight-pulse">參考照片</span>
+                            <span class="demo-pill">提供標記框範本</span>
                         </div>
                     </div>
                 `
@@ -4952,10 +5646,11 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '.apply-left-col',
                 pulseTag: '步驟 2 · 選擇套用目標',
                 title: '2. 選擇要套用的目標照片',
-                desc: '點選「找出相似照片」自動勾選畫面相近的照片，或點選「全選未標記照片」，也可直接點選下方照片卡片。',
-                tip: '💡 展開「相似照片設定」可調整篩選的相似度門檻。',
+                desc: '使用「找出相似照片」或「全選未標記照片」快速勾選對象，亦可直接點擊下方照片卡片個別選取。',
+                tipType: 'info',
+                tip: '展開「相似照片設定」可依需求微調相似度篩選門檻。',
                 demoHtml: `
-                    <div class="tour-demo-header"><span>▶ 操作示範：快速勾選目標照片</span><span>批量選取</span></div>
+                    <div class="tour-demo-header"><span>操作示範 · 批量勾選目標</span><span>快速選取</span></div>
                     <div class="tour-demo-visual">
                         <div class="demo-pill-row">
                             <span class="demo-pill highlight-pulse">找出相似照片</span>
@@ -4970,8 +5665,9 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '.advanced-apply-details',
                 pulseTag: '步驟 3 · 檢查套用設定',
                 title: '3. 檢查對齊與覆蓋設定',
-                desc: '開啟「智慧局部對齊」時，就算物體位置稍微移動，也會自動幫您把框對齊。',
-                tip: '⚠️ 注意：若勾選「覆蓋既有標記」，原標記會被取代（系統會自動備份）。',
+                desc: '展開「套用設定」並開啟「智慧局部對齊」時，即使目標物位置略微偏移，系統仍會自動對齊框位。',
+                tipType: 'warn',
+                tip: '若勾選「覆蓋既有標記」，既有標記檔將被覆寫（執行前會自動建立還原點）。',
                 onEnter() {
                     const details = document.querySelector('.advanced-apply-details');
                     if (details && !details.open) {
@@ -4980,7 +5676,7 @@ const GUIDED_TOUR_CONFIGS = {
                     }
                 },
                 demoHtml: `
-                    <div class="tour-demo-header"><span>▶ 操作示範：自動跟隨物體微調框位</span><span>智慧局部對齊</span></div>
+                    <div class="tour-demo-header"><span>操作示範 · 智慧局部對齊</span><span>自動跟隨目標位移</span></div>
                     <div class="tour-demo-visual">
                         <div class="demo-zncc-wrap">
                             <div class="demo-zncc-obj">目標物體</div>
@@ -4994,14 +5690,15 @@ const GUIDED_TOUR_CONFIGS = {
                 selector: '.apply-right-col',
                 pulseTag: '步驟 4 · 預覽並建立草稿',
                 title: '4. 確認預覽並建立草稿',
-                desc: '先查看「寫入預覽」確認新增與略過的張數，再點擊底部「建立草稿」執行套用。',
-                tip: '⚠️ 注意：批次套用後仍需到「標記檢視」逐張確認，才算正式完成。',
+                desc: '檢視右側「寫入預覽」確認新增、覆蓋與略過張數無誤後，點擊「建立草稿」即可完成批次寫入。',
+                tipType: 'warn',
+                tip: '建立的批次草稿仍會標記為待人工確認，建議進入「標記檢視」逐張確認。',
                 demoHtml: `
-                    <div class="tour-demo-header"><span>▶ 操作示範：確認預覽後點擊建立草稿</span><span>完成後逐張確認</span></div>
+                    <div class="tour-demo-header"><span>操作示範 · 預覽寫入執行</span><span>完成後逐張確認</span></div>
                     <div class="tour-demo-visual">
                         <div class="demo-pill-row">
                             <span class="demo-pill">預覽：新增 / 略過</span>
-                            <span class="demo-pill highlight-pulse">建立草稿 ➔ 逐張確認</span>
+                            <span class="demo-pill highlight-pulse">建立草稿</span>
                         </div>
                     </div>
                 `
@@ -5009,61 +5706,6 @@ const GUIDED_TOUR_CONFIGS = {
         ]
     }
 };
-
-function isGuidedTourActive() {
-    const overlay = document.getElementById('guidedTourOverlay');
-    const promptModal = document.getElementById('guidedTourPromptModal');
-    return Boolean(
-        (overlay && overlay.style.display !== 'none') ||
-        (promptModal && promptModal.style.display !== 'none')
-    );
-}
-
-function maybePromptGuidedTour(tourType) {
-    if (!GUIDED_TOUR_CONFIGS[tourType]) return;
-    if (!scanData || !scanData.ok || (scanData.summary && scanData.summary.photo_count === 0)) return;
-    if (isGuidedTourActive() || activeModal) return;
-    if (!shouldAutoPromptTour(tourType)) return;
-
-    openGuidedTourPrompt(tourType);
-}
-
-function openGuidedTourPrompt(tourType) {
-    const cfg = GUIDED_TOUR_CONFIGS[tourType];
-    if (!cfg) return;
-    pendingPromptTourType = tourType;
-
-    document.getElementById('tourPromptBadge').textContent = cfg.promptBadge;
-    document.getElementById('tourPromptTitle').textContent = cfg.promptTitle;
-    document.getElementById('tourPromptDesc').textContent = cfg.promptDesc;
-    document.getElementById('tourPromptPoints').innerHTML = cfg.promptPoints
-        .map(pt => `<li>${escapeHtml(pt)}</li>`)
-        .join('');
-
-    const modal = document.getElementById('guidedTourPromptModal');
-    modal.style.display = 'flex';
-    document.getElementById('btnTourPromptStart')?.focus();
-}
-
-function handleTourPromptChoice(choice) {
-    const tourType = pendingPromptTourType;
-    const modal = document.getElementById('guidedTourPromptModal');
-    if (modal) modal.style.display = 'none';
-    pendingPromptTourType = null;
-
-    if (!tourType) return;
-
-    if (choice === 'start') {
-        setTourDailyState(tourType, 'start');
-        startGuidedTour(tourType);
-    } else if (choice === 'hide_today') {
-        setTourDailyState(tourType, 'hide_today');
-        showToast('已設定今日不再自動顯示此指引（隨時可點選右上角「🎓 操作指引」重新開啟）。', 'info');
-    } else {
-        // 暫時略過：記錄今日首次已詢問，避免同日重整頁面重複彈出干擾
-        setTourDailyState(tourType, 'skip');
-    }
-}
 
 function openGuidedTourLauncher() {
     if (!scanData || !scanData.ok || !scanData.summary || scanData.summary.photo_count === 0) {
@@ -5074,37 +5716,34 @@ function openGuidedTourLauncher() {
     startGuidedTour(targetTour);
 }
 
-function startGuidedTourFromLauncher(tourType) {
-    closeModal('guidedTourLauncherModal');
-    if (!scanData || !scanData.ok || !scanData.summary || scanData.summary.photo_count === 0) {
-        showToast('請先載入照片資料夾', 'info');
-        return;
-    }
-    startGuidedTour(tourType);
+function switchGuidedTourType(tourType) {
+    if (!GUIDED_TOUR_CONFIGS[tourType] || tourType === activeTourType) return;
+    startGuidedTour(tourType, { preserveOpener: true });
 }
 
 function runTourStepCleanups() {
     while (tourSavedCleanupCallbacks.length > 0) {
         const fn = tourSavedCleanupCallbacks.pop();
-        try { fn(); } catch (_) {}
+        try { fn(); } catch (_) { }
     }
 }
 
-function startGuidedTour(tourType) {
+async function startGuidedTour(tourType, options = {}) {
     const cfg = GUIDED_TOUR_CONFIGS[tourType];
     if (!cfg || !cfg.steps || !cfg.steps.length) return;
+    if (activeModal) closeModal(activeModal.id);
+    if (!options.preserveOpener) {
+        tourOpenerEl = document.getElementById('btnLaunchTour') || document.activeElement;
+    }
 
     runTourStepCleanups();
     activeTourType = tourType;
     activeTourStepIdx = 0;
 
-    const overlay = document.getElementById('guidedTourOverlay');
-    overlay.style.display = 'block';
-
-    renderCurrentGuidedTourStep();
+    await renderCurrentGuidedTourStep();
 }
 
-function stepGuidedTour(delta) {
+async function stepGuidedTour(delta) {
     if (!activeTourType) return;
     const cfg = GUIDED_TOUR_CONFIGS[activeTourType];
     if (!cfg) return;
@@ -5118,41 +5757,42 @@ function stepGuidedTour(delta) {
 
     runTourStepCleanups();
     activeTourStepIdx = nextIdx;
-    renderCurrentGuidedTourStep();
-}
-
-function markCurrentTourHideToday() {
-    if (!activeTourType) return;
-    setTourDailyState(activeTourType, 'hide_today');
-    endGuidedTour('hide_today');
+    await renderCurrentGuidedTourStep();
 }
 
 function endGuidedTour(reason = 'closed') {
+    tourRenderToken += 1;
     runTourStepCleanups();
     const overlay = document.getElementById('guidedTourOverlay');
     if (overlay) overlay.style.display = 'none';
     activeTourType = null;
     activeTourStepIdx = 0;
+    const opener = tourOpenerEl;
+    tourOpenerEl = null;
+    opener?.focus();
 }
 
-function renderCurrentGuidedTourStep() {
+async function renderCurrentGuidedTourStep() {
     if (!activeTourType) return;
     const cfg = GUIDED_TOUR_CONFIGS[activeTourType];
     const step = cfg.steps[activeTourStepIdx];
     if (!step) return;
+    const token = ++tourRenderToken;
 
-    // 確保切換至該步驟對應的頁面（不觸發自動詢問）
     if (step.stepTarget && currentStep !== step.stepTarget && scanData?.ok) {
-        isTourInternalStepSwitch = true;
-        try {
-            switchStep(step.stepTarget);
-        } finally {
-            isTourInternalStepSwitch = false;
+        await switchStep(step.stepTarget);
+        if (token !== tourRenderToken || !activeTourType) return;
+        if (currentStep !== step.stepTarget) {
+            endGuidedTour('aborted');
+            return;
         }
     }
 
+    const overlay = document.getElementById('guidedTourOverlay');
+    if (overlay) overlay.style.display = 'block';
+
     if (typeof step.onEnter === 'function') {
-        try { step.onEnter(); } catch (_) {}
+        try { step.onEnter(); } catch (_) { }
     }
 
     const total = cfg.steps.length;
@@ -5161,7 +5801,11 @@ function renderCurrentGuidedTourStep() {
     document.getElementById('guidedTourPulseTag').textContent = step.pulseTag || `步驟 ${activeTourStepIdx + 1}`;
     document.getElementById('guidedTourStepTitle').textContent = step.title;
 
-    // 支援換行段落呈現
+    const btnModeReview = document.getElementById('btnTourModeReview');
+    const btnModeApply = document.getElementById('btnTourModeApply');
+    if (btnModeReview) btnModeReview.classList.toggle('active', activeTourType === 'post_load');
+    if (btnModeApply) btnModeApply.classList.toggle('active', activeTourType === 'batch_apply');
+
     const descEl = document.getElementById('guidedTourStepDesc');
     descEl.innerHTML = escapeHtml(step.desc).replace(/\n/g, '<br>');
 
@@ -5176,20 +5820,21 @@ function renderCurrentGuidedTourStep() {
 
     const tipEl = document.getElementById('guidedTourStepTip');
     if (step.tip) {
-        tipEl.style.display = 'block';
-        tipEl.textContent = step.tip;
+        const isWarn = step.tipType === 'warn';
+        tipEl.style.display = 'flex';
+        tipEl.className = isWarn ? 'guided-tour-tip is-warn' : 'guided-tour-tip';
+        tipEl.innerHTML = `${uiIcon(isWarn ? 'alert' : 'info', 'ui-icon-sm')}<span>${escapeHtml(step.tip)}</span>`;
     } else {
         tipEl.style.display = 'none';
+        tipEl.innerHTML = '';
     }
 
-    // 渲染進度圓點
     const dotsEl = document.getElementById('guidedTourDots');
     dotsEl.innerHTML = cfg.steps.map((_, idx) => {
         const cls = idx === activeTourStepIdx ? 'guided-tour-dot active' : (idx < activeTourStepIdx ? 'guided-tour-dot done' : 'guided-tour-dot');
         return `<span class="${cls}"></span>`;
     }).join('');
 
-    // 按鈕狀態切換
     const btnPrev = document.getElementById('btnTourPrev');
     const btnNext = document.getElementById('btnTourNext');
     const btnFinish = document.getElementById('btnTourFinish');
@@ -5201,12 +5846,11 @@ function renderCurrentGuidedTourStep() {
     btnFinish.style.display = isLast ? 'inline-flex' : 'none';
     btnSkip.style.display = isLast ? 'none' : 'inline-flex';
 
-    // 先捲動目標元件至可視範圍並定位聚光燈與浮動卡片
     const targetEl = document.querySelector(step.selector);
     if (targetEl && typeof targetEl.scrollIntoView === 'function') {
         try {
             targetEl.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
-        } catch (_) {}
+        } catch (_) { }
     }
 
     positionGuidedTourElements();
@@ -5261,9 +5905,8 @@ function positionGuidedTourElements() {
     spotlight.style.height = `${spotRect.height}px`;
     spotlight.classList.toggle('tag-inside', spotRect.top < 32);
 
-    // 計算浮動說明卡片最佳位置（避免遮擋目標元件，並確保在小螢幕 100% 完整落於可視範圍內）
     const popRect = popover.getBoundingClientRect();
-    const popW = popRect.width || 410;
+    const popW = popRect.width || 420;
     const popH = popRect.height || 310;
     const margin = 14;
     const safeEdge = 12;
@@ -5289,15 +5932,8 @@ function positionGuidedTourElements() {
         popLeft = spotRect.left - popW - margin;
         popTop = spotRect.top + (spotRect.height - popH) / 2;
     } else {
-        // 當目標區域較大（例如主畫布或整欄）時，將說明卡片置於視窗右下或左下最不遮擋核心視覺的位置
-        const candidates = [
-            { top: vh - popH - safeEdge, left: vw - popW - safeEdge },
-            { top: vh - popH - safeEdge, left: safeEdge },
-            { top: safeEdge + 54, left: vw - popW - safeEdge }
-        ];
-        const chosen = candidates[0];
-        popTop = chosen.top;
-        popLeft = chosen.left;
+        popTop = vh - popH - safeEdge;
+        popLeft = vw - popW - safeEdge;
     }
 
     popLeft = Math.max(safeEdge, Math.min(vw - popW - safeEdge, Math.round(popLeft)));
@@ -5320,33 +5956,36 @@ window.addEventListener('resize', scheduleTourReposition);
 window.addEventListener('scroll', scheduleTourReposition, true);
 
 function handleGuidedTourKey(e) {
-    const promptModal = document.getElementById('guidedTourPromptModal');
-    if (promptModal && promptModal.style.display !== 'none') {
-        if (e.key === 'Escape') {
-            e.preventDefault();
-            handleTourPromptChoice('skip');
-        } else if (e.key === 'Enter' && document.activeElement?.tagName !== 'BUTTON') {
-            e.preventDefault();
-            handleTourPromptChoice('start');
-        }
-        return true;
-    }
-
     const overlay = document.getElementById('guidedTourOverlay');
-    if (overlay && overlay.style.display !== 'none') {
-        if (e.key === 'Escape') {
-            e.preventDefault();
-            endGuidedTour('closed');
-        } else if (e.key === 'ArrowRight') {
-            e.preventDefault();
-            stepGuidedTour(1);
-        } else if (e.key === 'ArrowLeft') {
-            e.preventDefault();
-            stepGuidedTour(-1);
+    if (!overlay || overlay.style.display === 'none') return false;
+
+    if (e.key === 'Escape') {
+        e.preventDefault();
+        endGuidedTour('closed');
+    } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        stepGuidedTour(1);
+    } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        stepGuidedTour(-1);
+    } else if (e.key === 'Tab') {
+        const popover = document.getElementById('guidedTourPopover');
+        const controls = popover
+            ? Array.from(popover.querySelectorAll('button')).filter(c => !c.disabled && c.getClientRects().length)
+            : [];
+        if (controls.length) {
+            const first = controls[0];
+            const last = controls.at(-1);
+            if (e.shiftKey && (document.activeElement === first || !popover.contains(document.activeElement))) {
+                e.preventDefault();
+                last.focus();
+            } else if (!e.shiftKey && (document.activeElement === last || !popover.contains(document.activeElement))) {
+                e.preventDefault();
+                first.focus();
+            }
         }
-        return true;
     }
-    return false;
+    return true;
 }
 
 window.addEventListener('beforeunload', (e) => {

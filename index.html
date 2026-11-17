@@ -6,43 +6,53 @@
     <meta name="theme-color" content="#17232A">
     <title>AI 影像標記工具</title>
     <link rel="manifest" href="./manifest.json">
-    <link rel="icon" href="./static/icon.svg" type="image/svg+xml">
+    <link rel="icon" href="./static/cmc_favicon.png" type="image/png">
+    <link rel="apple-touch-icon" href="./static/cmc_favicon.png">
     <link rel="stylesheet" href="./static/css/style.css">
 </head>
 <body>
     <!-- 精簡深色頁首 (#17232A) -->
     <header class="app-header">
         <div class="header-brand">
-            <span class="brand-mark">AI HUB</span>
+            <span class="brand-logo-badge">
+                <img src="./static/cmc_logo.png" alt="中華汽車 CMC" class="brand-logo-img" width="209" height="141">
+            </span>
             <h1 class="app-title" title="GitHub Pages 網頁版">AI 影像標記工具</h1>
             <div id="headerFolderBox" class="folder-indicator" style="display: none;">
+                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                 <span class="folder-label">目前資料夾：</span>
                 <button class="folder-name-btn" id="headerFolderName" onclick="toggleFolderDetailModal()"></button>
-                <button class="btn-xs" style="margin-left:6px;background:#2874A6;color:#fff;border-color:#3498DB;" onclick="pickAndLoadFolder()">選擇照片資料夾</button>
+                <button class="header-folder-btn" onclick="pickAndLoadFolder()">選擇照片資料夾</button>
             </div>
         </div>
 
         <!-- 右側輔助工具列（不強迫依序經過） -->
         <div class="header-actions">
             <button class="util-btn util-undo-btn" id="btnQuickUndo" onclick="handleUndoLast()" disabled>
-                ↩ 還原上一步
+                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+                <span>還原上一步</span>
             </button>
-            <button class="util-btn" onclick="openModal('pathSettingsModal')">路徑設定</button>
+            <button class="util-btn" onclick="openModal('pathSettingsModal')">
+                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                <span>路徑設定</span>
+            </button>
             <button class="util-btn" onclick="openModal('shortcutModal')">
-                快捷鍵說明
+                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M7 16h10"/></svg>
+                <span>快捷鍵說明</span>
             </button>
             <button class="util-btn util-tour-btn" id="btnLaunchTour" onclick="openGuidedTourLauncher()">
-                🎓 操作指引
+                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>
+                <span>操作指引</span>
             </button>
         </div>
     </header>
     <nav class="workspace-nav" aria-label="專案工作區">
         <button class="workspace-nav-btn" id="navBtnReview" data-step="review" onclick="switchStep('review')" disabled>
-            標記檢視
+            <span>標記檢視</span>
             <span id="navBadgePending" class="nav-pill warn" style="display: none;"></span>
         </button>
         <button class="workspace-nav-btn" id="navBtnApply" data-step="apply" onclick="switchStep('apply')" disabled>
-            批次套用
+            <span>批次套用</span>
             <span id="navBadgeUnlabeled" class="nav-pill" style="display: none;"></span>
         </button>
         <div class="workspace-nav-right-tools">
@@ -50,7 +60,15 @@
                 <span class="pill-dot"></span>
                 <span id="sharedClassesPillText">共用類別：classes.txt</span>
             </button>
-            <button class="workspace-nav-btn workspace-nav-tool" id="btnUtilRemap" onclick="openModal('remapModal')" disabled>類別修正</button>
+            <button class="workspace-nav-btn workspace-nav-tool" id="btnUtilTrainCheck" onclick="openModal('trainCheckModal')" disabled>
+                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+                <span>訓練前檢查</span>
+                <span id="navBadgeTrainCheck" class="nav-pill" style="display: none;"></span>
+            </button>
+            <button class="workspace-nav-btn workspace-nav-tool" id="btnUtilRemap" onclick="openModal('remapModal')" disabled>
+                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z"/><path d="M7 7h.01"/></svg>
+                <span>類別修正</span>
+            </button>
         </div>
     </nav>
     <div id="workspaceLoadStatus" class="workspace-status" role="status" hidden></div>
@@ -67,11 +85,15 @@
                 <!-- A. 未載入資料時的首次歡迎畫面 -->
                 <div id="welcomeLandingCard" class="welcome-landing">
                     <div class="surface-card welcome-hero-card">
+                        <div class="welcome-brand-row">
+                            <img src="./static/cmc_logo.png" alt="中華汽車 CMC" class="welcome-brand-logo" width="209" height="141">
+                        </div>
                         <h2 class="welcome-title">載入照片，開始標記</h2>
 
                         <div class="welcome-cta-row">
                             <button class="btn btn-primary btn-xl" id="btnWelcomePickFolder" onclick="pickAndLoadFolder()">
-                                選擇照片資料夾
+                                <svg class="ui-icon ui-icon-lg" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                                <span>選擇照片資料夾</span>
                             </button>
                         </div>
 
@@ -82,8 +104,6 @@
                                 <button class="btn btn-secondary" onclick="scanCurrentWorkspace()">載入此路徑</button>
                             </div>
                         </div>
-
-                        <p class="welcome-format-hint">支援 JPG／PNG／BMP／WEBP 與 .txt 標記檔</p>
                     </div>
                 </div>
 
@@ -162,7 +182,7 @@
                         </div>
 
                         <!-- 第 2 步：選擇要套用的照片 -->
-                        <div class="apply-block" style="flex:1;display:flex;flex-direction:column;min-height:0;margin-top:14px;">
+                        <div class="apply-block apply-block-targets">
                             <div class="block-header">
                                 <div>
                                     <h3>套用目標</h3>
@@ -265,7 +285,10 @@
                 <!-- 左側：可收合的照片清單欄 -->
                 <aside class="review-left-sidebar" id="reviewLeftSidebar">
                     <div class="sidebar-top-controls">
-                        <input type="text" id="searchInput" aria-label="搜尋檔名" class="form-input-sm" placeholder="搜尋檔名..." oninput="applyReviewSearch()">
+                        <div class="search-field-wrap">
+                            <svg class="ui-icon ui-icon-sm search-field-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                            <input type="text" id="searchInput" aria-label="搜尋檔名" class="form-input-sm" placeholder="搜尋檔名..." oninput="applyReviewSearch()">
+                        </div>
                         <div class="filter-chips-wrap" id="allScopeFilterChips" role="group" aria-label="快速篩選">
                             <button class="f-chip active" data-filter="all" aria-pressed="true" onclick="applyQuickFilter('all')">全部</button>
                             <button class="f-chip" data-filter="unlabeled" aria-pressed="false" onclick="applyQuickFilter('unlabeled')">未標記</button>
@@ -279,20 +302,25 @@
 
                 <div id="photoListResize" class="photo-list-resize" role="separator" tabindex="0"
                      aria-label="調整照片清單寬度" aria-controls="reviewLeftSidebar" aria-orientation="vertical"
-                     aria-valuemin="220" aria-valuemax="520" aria-valuenow="280"
-                     title="拖曳調整清單寬度；聚焦後可用左右方向鍵調整"></div>
+                     aria-valuemin="220" aria-valuemax="520" aria-valuenow="280"></div>
 
                 <!-- 中央：主畫布與頂部/底部操作列 -->
                 <div class="review-center-stage">
                     <!-- 畫布頂部精簡狀態與次要檢視工具列 -->
                     <div class="review-top-bar">
                         <div class="top-bar-left">
-                            <button class="btn-xs" aria-controls="reviewLeftSidebar" onclick="toggleReviewSidebar('left', this)">☰ 清單</button>
+                            <button class="btn-xs" aria-controls="reviewLeftSidebar" onclick="toggleReviewSidebar('left', this)">
+                                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+                                <span>清單</span>
+                            </button>
                             <span class="current-file-title" id="reviewCurrentFileName">尚未選取照片</span>
-                            <span class="ref-badge" id="reviewRefBadge" hidden>★ 參考照片</span>
+                            <span class="ref-badge" id="reviewRefBadge" hidden>
+                                <svg class="ui-icon ui-icon-xs" viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                                <span>參考照片</span>
+                            </span>
                             <span class="review-position" id="reviewQueueProgress"></span>
                             <!-- 明確儲存狀態指示器（置於顯眼處） -->
-                            <button type="button" id="saveStatusIndicator" aria-live="polite" class="save-badge saved" disabled>[✓] 已儲存</button>
+                            <button type="button" id="saveStatusIndicator" aria-live="polite" class="save-badge saved" disabled>已儲存</button>
                         </div>
 
                         <div class="review-mode-bar">
@@ -307,7 +335,10 @@
                                 <span id="zoomLevelText" class="zoom-label" role="status">適應視窗</span>
                                 <button class="btn-xs" onclick="adjustZoom(1.18)" aria-label="放大">+</button>
                                 <button class="btn-xs" onclick="resetZoom()">重設縮放</button>
-                                <button type="button" class="btn-xs btn-loupe-toggle active" id="btnToggleLoupe" aria-pressed="true" onclick="toggleMagnifierLoupe()">🔍 放大鏡 (M)</button>
+                                <button type="button" class="btn-xs btn-loupe-toggle active" id="btnToggleLoupe" aria-pressed="true" onclick="toggleMagnifierLoupe()">
+                                    <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M11 8v6M8 11h6"/></svg>
+                                    <span>放大鏡 (M)</span>
+                                </button>
                             </div>
                         </div>
 
@@ -324,7 +355,6 @@
 
                     <div id="reviewEmptyState" class="review-empty-state" hidden role="status">
                         <strong>沒有符合的照片</strong>
-                        <span>清除搜尋與篩選後，繼續檢查。</span>
                     </div>
                     <!-- 畫布主視窗（保持照片正確比例，不扭曲照片） -->
                     <div class="canvas-stage-area" id="canvasViewport">
@@ -352,11 +382,13 @@
                     <div class="review-bottom-bar">
                         <!-- 左側次要操作：上一張 / 下一張 -->
                         <div class="bottom-secondary-left">
-                            <button class="btn btn-secondary" onclick="navigateItem(-1)" title="快捷鍵：A" aria-keyshortcuts="A">
-                                上一張 (A)
+                            <button class="btn btn-secondary" onclick="navigateItem(-1)" aria-keyshortcuts="A">
+                                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+                                <span>上一張 (A)</span>
                             </button>
-                            <button class="btn btn-secondary" onclick="navigateItem(1)" title="快捷鍵：D" aria-keyshortcuts="D">
-                                下一張 (D)
+                            <button class="btn btn-secondary" onclick="navigateItem(1)" aria-keyshortcuts="D">
+                                <span>下一張 (D)</span>
+                                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
                             </button>
                         </div>
 
@@ -393,10 +425,12 @@
                                     ＋ 新增框 (W)
                                 </button>
                                 <button type="button" id="btnDuplicateSelectedBox" class="btn-xs" style="display: none;" onclick="duplicateSelectedBoxOnCanvas()">
-                                    複製框 (B)
+                                    <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                                    <span>複製框 (B)</span>
                                 </button>
                                 <button type="button" id="btnDeleteSelectedBox" class="btn-xs btn-danger-outline" style="display: none;" onclick="deleteSelectedBoxOnCanvas()">
-                                    刪除 (Del)
+                                    <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                                    <span>刪除 (Del)</span>
                                 </button>
                             </div>
                         </div>
@@ -425,7 +459,9 @@
         <div class="modal-dialog modal-lg">
             <div class="modal-header">
                 <h3 id="pathSettingsModalTitle">路徑設定</h3>
-                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('pathSettingsModal')">✕</button>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('pathSettingsModal')">
+                    <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                </button>
             </div>
             <div class="modal-body" id="loadSettingsPanel">
                 <div class="settings-grid">
@@ -445,8 +481,14 @@
                             <strong>多資料夾共用類別 (classes.txt)</strong>
                         </div>
                         <div class="path-shared-actions">
-                            <button type="button" class="btn btn-secondary btn-sm" onclick="pickSharedClassesFile()">📄 挑選現有類別檔</button>
-                            <button type="button" class="btn btn-secondary btn-sm" onclick="createSharedClassesFile()">✨ 新建共用類別檔</button>
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="pickSharedClassesFile()">
+                                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+                                <span>挑選現有類別檔</span>
+                            </button>
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="createSharedClassesFile()">
+                                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                                <span>新建共用類別檔</span>
+                            </button>
                         </div>
                         <div id="sharedClassesOptionsRow" class="shared-classes-options-row" style="display: none;">
                             <div class="shared-options-info">
@@ -478,7 +520,9 @@
         <div class="modal-dialog modal-xl">
             <div class="modal-header">
                 <h3 id="remapModalTitle">類別修正</h3>
-                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('remapModal')">✕</button>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('remapModal')">
+                    <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                </button>
             </div>
             <div class="modal-body">
                 <div id="remapSharedClassesWarning" class="remap-shared-warning" style="display: none;" role="alert"></div>
@@ -493,6 +537,27 @@
         </div>
     </div>
 
+    <!-- 輔助工具彈窗：訓練前檢查 -->
+    <div id="trainCheckModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="trainCheckModalTitle" style="display: none;" onclick="if(event.target===this) closeModal('trainCheckModal')">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-header">
+                <h3 id="trainCheckModalTitle">訓練前檢查</h3>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('trainCheckModal')">
+                    <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div id="trainCheckSummaryBanner" class="train-check-banner"></div>
+                <div id="trainCheckList" class="train-check-list"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="loadTrainingReadinessCheck()">重新檢查</button>
+                <button type="button" class="btn btn-primary" id="btnTrainFixAll" onclick="runTrainingFix(['fix_all'])" disabled>一鍵修正可處理項目</button>
+                <button type="button" class="btn btn-ghost" onclick="closeModal('trainCheckModal')">關閉</button>
+            </div>
+        </div>
+    </div>
+
     <!-- ==================================================================
          輔助工具彈窗 4：快捷鍵說明
          ================================================================== -->
@@ -500,7 +565,9 @@
         <div class="modal-dialog">
             <div class="modal-header">
                 <h3 id="shortcutModalTitle">快捷鍵</h3>
-                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('shortcutModal')">✕</button>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('shortcutModal')">
+                    <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                </button>
             </div>
             <div class="modal-body">
 
@@ -522,7 +589,7 @@
                         </tr>
                         <tr>
                             <td><strong>滑鼠拖曳標記框</strong></td>
-                            <td>移動位置或拉白點縮放（按 <kbd>C</kbd> 儲存）</td>
+                            <td>移動或縮放標記框</td>
                         </tr>
                         <tr>
                             <td><kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd></td>
@@ -574,12 +641,14 @@
                     <h3 id="newBoxClassModalTitle">輸入新標記框的類別名稱</h3>
                     <p class="subtitle" id="newBoxClassIdPreview"></p>
                 </div>
-                <button class="btn-close" aria-label="關閉彈窗" onclick="cancelNewBoxClassModal()">✕</button>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="cancelNewBoxClassModal()">
+                    <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                </button>
             </div>
             <div class="modal-body">
                 <div class="new-box-class-form">
                     <label for="inputNewBoxClassName" class="box-tool-label">新類別名稱：</label>
-                    <input type="text" id="inputNewBoxClassName" class="form-input" placeholder="請輸入新類別名稱（按 Enter 確認）" oninput="updateNewBoxClassPreview()" onkeydown="handleNewBoxClassInputKey(event)">
+                    <input type="text" id="inputNewBoxClassName" class="form-input" placeholder="輸入新類別名稱" oninput="updateNewBoxClassPreview()" onkeydown="handleNewBoxClassInputKey(event)">
                     <div id="existingClassesQuickWrap" class="existing-classes-quick-wrap" style="display: none;">
                         <span class="box-tool-label">或點選既有類別：</span>
                         <div id="existingClassesQuickList" class="existing-classes-chips"></div>
@@ -598,7 +667,9 @@
         <div class="modal-dialog">
             <div class="modal-header">
                 <h3 id="folderDetailModalTitle">專案資料夾</h3>
-                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('folderDetailModal')">✕</button>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('folderDetailModal')">
+                    <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                </button>
             </div>
             <div class="modal-body">
                 <div class="meta-rows">
@@ -621,7 +692,9 @@
                     <h3 id="sharedSetupModalTitle">尚未建立類別檔 (classes.txt)</h3>
                     <p class="subtitle shared-setup-subtitle" id="sharedSetupSubtitle"></p>
                 </div>
-                <button class="btn-close" aria-label="關閉彈窗" onclick="dismissSharedClassesGuide()">✕</button>
+                <button class="btn-close" aria-label="關閉彈窗" onclick="dismissSharedClassesGuide()">
+                    <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                </button>
             </div>
             <div class="modal-body shared-setup-body" id="sharedSetupBody"></div>
             <div class="modal-footer shared-setup-footer" id="sharedSetupFooter">
@@ -630,71 +703,19 @@
         </div>
     </div>
 
-    <!-- ==================================================================
-         互動式動態操作指引（Interactive Guided Tour）詢問彈窗、啟動選單與聚焦遮罩
-         ================================================================== -->
-    <div id="guidedTourPromptModal" class="modal-backdrop tour-prompt-backdrop" role="dialog" aria-modal="true" aria-labelledby="tourPromptTitle" style="display: none;">
-        <div class="modal-dialog tour-prompt-dialog">
-            <div class="tour-prompt-header">
-                <span class="tour-prompt-badge" id="tourPromptBadge">互動式動態操作指引</span>
-                <h3 id="tourPromptTitle">是否啟動操作指引？</h3>
-                <p class="tour-prompt-subtitle" id="tourPromptDesc"></p>
-            </div>
-            <div class="tour-prompt-body">
-                <ul class="tour-prompt-points" id="tourPromptPoints"></ul>
-            </div>
-            <div class="tour-prompt-footer">
-                <button type="button" class="btn btn-ghost btn-sm tour-hide-today-btn" id="btnTourPromptHideToday" onclick="handleTourPromptChoice('hide_today')">
-                    今日不再顯示
-                </button>
-                <div class="tour-prompt-main-actions">
-                    <button type="button" class="btn btn-secondary" id="btnTourPromptSkip" onclick="handleTourPromptChoice('skip')">
-                        暫時略過
-                    </button>
-                    <button type="button" class="btn btn-primary" id="btnTourPromptStart" onclick="handleTourPromptChoice('start')">
-                        開始指引 →
-                    </button>
-                </div>
-            </div>
+    <!-- 批次套用目標照片清單：滑鼠停留放大檢視（移開即刻恢復） -->
+    <div id="copyPhotoHoverPreview" class="copy-hover-preview" aria-hidden="true" style="display: none;">
+        <div class="copy-hover-header">
+            <strong id="copyHoverFileName" class="copy-hover-filename"></strong>
+            <span id="copyHoverStatusBadge" class="badge badge-info"></span>
         </div>
+        <div class="copy-hover-stage">
+            <canvas id="copyHoverCanvas"></canvas>
+        </div>
+        <div id="copyHoverFooter" class="copy-hover-footer"></div>
     </div>
 
-    <div id="guidedTourLauncherModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="tourLauncherTitle" style="display: none;" onclick="if(event.target===this) closeModal('guidedTourLauncherModal')">
-        <div class="modal-dialog">
-            <div class="modal-header">
-                <h3 id="tourLauncherTitle">🎓 操作指引</h3>
-                <button class="btn-close" aria-label="關閉彈窗" onclick="closeModal('guidedTourLauncherModal')">✕</button>
-            </div>
-            <div class="modal-body">
-                <div class="tour-launcher-cards">
-                    <div class="tour-launcher-card">
-                        <div class="tour-launcher-card-info">
-                            <span class="badge badge-info">6 步驟</span>
-                            <h4>標記檢視操作指引</h4>
-                            <p>切換、篩選、畫框微調與確認流程</p>
-                        </div>
-                        <button type="button" class="btn btn-primary" onclick="startGuidedTourFromLauncher('post_load')">
-                            開始指引
-                        </button>
-                    </div>
-                    <div class="tour-launcher-card">
-                        <div class="tour-launcher-card-info">
-                            <span class="badge badge-ok">4 步驟</span>
-                            <h4>批次套用操作指引</h4>
-                            <p>參考照片、相似篩選與建立草稿</p>
-                        </div>
-                        <button type="button" class="btn btn-primary" onclick="startGuidedTourFromLauncher('batch_apply')">
-                            開始指引
-                        </button>
-                    </div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" onclick="closeModal('guidedTourLauncherModal')">關閉</button>
-            </div>
-        </div>
-    </div>
-
+    <!-- 手動觸發之互動式操作指引遮罩與步驟卡片（無自動彈窗） -->
     <div id="guidedTourOverlay" class="guided-tour-overlay" role="dialog" aria-modal="true" aria-labelledby="guidedTourStepTitle" style="display: none;">
         <div id="guidedTourSpotlight" class="guided-tour-spotlight" aria-hidden="true">
             <span id="guidedTourPulseTag" class="guided-tour-pulse-tag">聚焦區域</span>
@@ -703,9 +724,15 @@
             <div class="guided-tour-popover-header">
                 <div class="guided-tour-meta">
                     <span id="guidedTourStepBadge" class="guided-tour-step-badge">步驟 1 / 6</span>
-                    <span id="guidedTourCategoryLabel" class="guided-tour-cat-label">操作指引</span>
+                    <span id="guidedTourCategoryLabel" class="guided-tour-cat-label">標記檢視指引</span>
+                    <div class="tour-mode-switch" role="group" aria-label="切換操作指引主題">
+                        <button type="button" class="tour-mode-btn active" id="btnTourModeReview" onclick="switchGuidedTourType('post_load')">標記檢視</button>
+                        <button type="button" class="tour-mode-btn" id="btnTourModeApply" onclick="switchGuidedTourType('batch_apply')">批次套用</button>
+                    </div>
                 </div>
-                <button type="button" class="btn-close guided-tour-close" aria-label="結束指引" title="結束指引 (Esc)" onclick="endGuidedTour('closed')">✕</button>
+                <button type="button" class="btn-close guided-tour-close" aria-label="結束指引" onclick="endGuidedTour('closed')">
+                    <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                </button>
             </div>
             <div id="guidedTourDots" class="guided-tour-dots" aria-hidden="true"></div>
             <h4 id="guidedTourStepTitle" class="guided-tour-title">步驟標題</h4>
@@ -717,9 +744,18 @@
                     <button type="button" class="btn btn-ghost btn-sm" id="btnTourSkip" onclick="endGuidedTour('skipped')">略過</button>
                 </div>
                 <div class="guided-tour-footer-right">
-                    <button type="button" class="btn btn-secondary btn-sm" id="btnTourPrev" onclick="stepGuidedTour(-1)">← 上一步</button>
-                    <button type="button" class="btn btn-primary btn-sm" id="btnTourNext" onclick="stepGuidedTour(1)">下一步 →</button>
-                    <button type="button" class="btn btn-primary btn-sm" id="btnTourFinish" onclick="endGuidedTour('completed')">結束指引 ✓</button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btnTourPrev" onclick="stepGuidedTour(-1)">
+                        <svg class="ui-icon ui-icon-xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+                        <span>上一步</span>
+                    </button>
+                    <button type="button" class="btn btn-primary btn-sm" id="btnTourNext" onclick="stepGuidedTour(1)">
+                        <span>下一步</span>
+                        <svg class="ui-icon ui-icon-xs" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                    </button>
+                    <button type="button" class="btn btn-primary btn-sm" id="btnTourFinish" onclick="endGuidedTour('completed')">
+                        <svg class="ui-icon ui-icon-xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+                        <span>完成指引</span>
+                    </button>
                 </div>
             </div>
         </div>
