@@ -284,6 +284,7 @@
 
                 <!-- 左側：可收合的照片清單欄 -->
                 <aside class="review-left-sidebar" id="reviewLeftSidebar">
+                    <button type="button" class="btn btn-secondary btn-sm close-review-left-sidebar" onclick="toggleReviewSidebar('left', this)">關閉照片清單</button>
                     <div class="sidebar-top-controls">
                         <div class="search-field-wrap">
                             <svg class="ui-icon ui-icon-sm search-field-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
@@ -309,10 +310,6 @@
                     <!-- 畫布頂部精簡狀態與次要檢視工具列 -->
                     <div class="review-top-bar">
                         <div class="top-bar-left">
-                            <button class="btn-xs" aria-controls="reviewLeftSidebar" onclick="toggleReviewSidebar('left', this)">
-                                <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
-                                <span>清單</span>
-                            </button>
                             <span class="current-file-title" id="reviewCurrentFileName">尚未選取照片</span>
                             <span class="ref-badge" id="reviewRefBadge" hidden>
                                 <svg class="ui-icon ui-icon-xs" viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
@@ -343,7 +340,7 @@
                         </div>
 
                         <div class="top-bar-right">
-                            <button class="btn-xs btn-details-toggle" aria-controls="reviewRightSidebar" aria-expanded="false" onclick="toggleReviewSidebar('right', this)">詳細資訊</button>
+                            <button type="button" class="btn-xs btn-details-toggle" aria-controls="reviewRightSidebar" aria-expanded="false" onclick="toggleReviewSidebar('right', this)">詳細資訊</button>
                         </div>
                     </div>
 
@@ -353,27 +350,44 @@
                     <!-- 任務全部確認完成時的通知列 -->
                     <div id="queueCompletedBanner" class="queue-complete-banner" style="display: none;"></div>
 
-                    <div id="reviewEmptyState" class="review-empty-state" hidden role="status">
-                        <strong>沒有符合的照片</strong>
-                    </div>
-                    <!-- 畫布主視窗（保持照片正確比例，不扭曲照片） -->
-                    <div class="canvas-stage-area" id="canvasViewport">
-                        <!-- 並排比較時的左側參考照片畫布 -->
-                        <div class="canvas-pane-box" id="masterCanvasPane" style="display: none;">
-                            <div class="pane-subcaption pane-reference"><strong>左側 · 參考照片</strong><span id="masterCanvasCaption"></span></div>
-                            <div class="canvas-flex-center" id="masterCanvasWrapper">
-                                <canvas id="masterCanvas"></canvas>
-                            </div>
+                    <!-- 中央照片檢視舞台：左右邊緣收納／展開耳釦不佔用頂部工具列空間 -->
+                    <div class="review-stage-shell">
+                        <button type="button" id="btnToggleLeftSidebarEar"
+                                class="review-edge-toggle review-edge-toggle-left"
+                                aria-controls="reviewLeftSidebar" aria-expanded="true"
+                                aria-label="收納照片清單" title="收納照片清單"
+                                onclick="toggleReviewSidebar('left', this)">
+                            <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+                        </button>
+                        <button type="button" id="btnToggleBoxesSidebarEar"
+                                class="review-edge-toggle review-edge-toggle-boxes"
+                                aria-controls="pinnedBoxesSidebar" aria-expanded="true"
+                                aria-label="收納標記框清單" title="收納標記框清單"
+                                onclick="toggleReviewSidebar('boxes', this)">
+                            <svg class="ui-icon ui-icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                        </button>
+                        <div id="reviewEmptyState" class="review-empty-state" hidden role="status">
+                            <strong>沒有符合的照片</strong>
                         </div>
-
-                        <!-- 主操作畫布 -->
-                        <div class="canvas-pane-box" id="targetCanvasPane">
-                            <div class="pane-subcaption">
-                                <strong id="targetCanvasRole">目前照片</strong><span id="targetCanvasCaption"></span><span id="comparisonStatus" role="status"></span>
-
+                        <!-- 畫布主視窗（保持照片正確比例，不扭曲照片） -->
+                        <div class="canvas-stage-area" id="canvasViewport">
+                            <!-- 並排比較時的左側參考照片畫布 -->
+                            <div class="canvas-pane-box" id="masterCanvasPane" style="display: none;">
+                                <div class="pane-subcaption pane-reference"><strong>左側 · 參考照片</strong><span id="masterCanvasCaption"></span></div>
+                                <div class="canvas-flex-center" id="masterCanvasWrapper">
+                                    <canvas id="masterCanvas"></canvas>
+                                </div>
                             </div>
-                            <div class="canvas-flex-center" id="mainCanvasWrapper">
-                                <canvas id="targetCanvas"></canvas>
+
+                            <!-- 主操作畫布 -->
+                            <div class="canvas-pane-box" id="targetCanvasPane">
+                                <div class="pane-subcaption">
+                                    <strong id="targetCanvasRole">目前照片</strong><span id="targetCanvasCaption"></span><span id="comparisonStatus" role="status"></span>
+
+                                </div>
+                                <div class="canvas-flex-center" id="mainCanvasWrapper">
+                                    <canvas id="targetCanvas"></canvas>
+                                </div>
                             </div>
                         </div>
                     </div>

@@ -228,7 +228,7 @@ async function pickAndLoadFolder() {
             document.getElementById('inputImageDir').value = data.path;
             document.getElementById('inputImageDirLoaded').value = data.path;
             document.getElementById('inputClassesPath').value = '';
-            await scanCurrentWorkspace({ restoreSession: true });
+            await scanCurrentWorkspace({ restoreSession: true, folderSwitched: true });
         } else if (data.ok && data.cancelled) {
             // Cancelled intentionally by user
         } else {
@@ -942,7 +942,9 @@ async function scanCurrentWorkspace(options = {}) {
         }
 
         const prevScanData = scanData;
-        if (scanData?.workspace_id !== data.workspace_id) {
+        const isWorkspaceChanged = scanData?.workspace_id !== data.workspace_id ||
+            Boolean(prevScanData?.image_dir && data.image_dir && prevScanData.image_dir !== data.image_dir);
+        if (isWorkspaceChanged) {
             masterStem = null;
             activeStem = null;
             copySelectedStems.clear();
@@ -974,6 +976,9 @@ async function scanCurrentWorkspace(options = {}) {
             selectedBoxIndex = -1;
             copyHoverImgCache.clear();
             hideCopyPhotoHoverPreview();
+        }
+        if (options.folderSwitched || isWorkspaceChanged) {
+            resetReviewSidebarsToDefault();
         }
         scanData = data;
         if (!scanData.shared_classes_info && !window.YoloWebEngine?.isActive()) {
@@ -2383,11 +2388,16 @@ function saveDisplayPreference(key, value) {
 function updateReviewLayout() {
     const workspace = document.getElementById('reviewWorkspace');
     const sidebar = document.getElementById('reviewLeftSidebar');
+    const boxesSidebar = document.getElementById('pinnedBoxesSidebar');
     if (!workspace || !sidebar || currentStep !== 'review') return;
     const width = workspace.clientWidth;
     const compact = width < 960;
+    const isNarrow = Boolean(window.matchMedia?.('(max-width: 900px)')?.matches);
     workspace.classList.toggle('compact-review', compact);
     workspace.classList.toggle('without-list', sidebar.classList.contains('collapsed'));
+    workspace.classList.toggle('without-boxes', Boolean(boxesSidebar?.classList.contains('collapsed')));
+    syncSidebarToggleButton('left', isNarrow ? sidebar.classList.contains('expanded') : !sidebar.classList.contains('collapsed'));
+    syncSidebarToggleButton('boxes', !boxesSidebar?.classList.contains('collapsed'));
     redrawCanvases();
 }
 
@@ -2464,15 +2474,66 @@ function initPhotoListWidth() {
     });
 }
 
+function getReviewSidebarElement(side) {
+    if (side === 'left') return document.getElementById('reviewLeftSidebar');
+    if (side === 'boxes') return document.getElementById('pinnedBoxesSidebar');
+    return document.getElementById('reviewRightSidebar');
+}
+
+function syncSidebarToggleButton(side, visible) {
+    const sidebar = getReviewSidebarElement(side);
+    if (!sidebar) return null;
+    const trigger = document.querySelector(`button[aria-controls="${sidebar.id}"]`);
+    if (!trigger) return null;
+    trigger.setAttribute('aria-expanded', String(Boolean(visible)));
+    if (side === 'left') {
+        const label = visible ? '收納照片清單' : '展開照片清單';
+        trigger.setAttribute('aria-label', label);
+        trigger.title = label;
+    } else if (side === 'boxes') {
+        const label = visible ? '收納標記框清單' : '展開標記框清單';
+        trigger.setAttribute('aria-label', label);
+        trigger.title = label;
+    }
+    return trigger;
+}
+
+function resetReviewSidebarsToDefault() {
+    const leftSidebar = document.getElementById('reviewLeftSidebar');
+    if (leftSidebar) {
+        leftSidebar.classList.remove('collapsed', 'expanded');
+        syncSidebarToggleButton('left', !window.matchMedia?.('(max-width: 900px)')?.matches);
+    }
+    const boxesSidebar = document.getElementById('pinnedBoxesSidebar');
+    if (boxesSidebar) {
+        boxesSidebar.classList.remove('collapsed');
+        syncSidebarToggleButton('boxes', true);
+    }
+    const rightSidebar = document.getElementById('reviewRightSidebar');
+    if (rightSidebar) {
+        rightSidebar.classList.remove('expanded');
+        rightSidebar.classList.add('collapsed');
+        syncSidebarToggleButton('right', false);
+    }
+    const workspace = document.getElementById('reviewWorkspace');
+    if (workspace) {
+        workspace.classList.remove('without-list', 'without-boxes');
+    }
+    if (currentStep === 'review') {
+        updateReviewLayout();
+    }
+}
+
 function toggleReviewSidebar(side, button) {
-    const sidebar = document.getElementById(side === 'left' ? 'reviewLeftSidebar' : 'reviewRightSidebar');
-    const overlay = side === 'right' || window.matchMedia('(max-width: 900px)').matches;
+    const sidebar = getReviewSidebarElement(side);
+    if (!sidebar) return;
+    const overlay = side === 'right' || (side === 'left' && Boolean(window.matchMedia?.('(max-width: 900px)')?.matches));
     if (overlay) sidebar.classList.remove('collapsed');
     const visible = overlay ? sidebar.classList.toggle('expanded') : !sidebar.classList.toggle('collapsed');
-    const trigger = document.querySelector(`[aria-controls="${sidebar.id}"]`);
-    trigger?.setAttribute('aria-expanded', String(visible));
+    const trigger = syncSidebarToggleButton(side, visible);
     if (side === 'right' && visible) sidebar.querySelector('.close-review-sidebar')?.focus();
     else if (button && button !== trigger) trigger?.focus();
+    updateReviewLayout();
     setTimeout(updateReviewLayout, 50);
 }
 
@@ -5661,7 +5722,11 @@ const GUIDED_TOUR_CONFIGS = {
                     const leftBar = document.getElementById('reviewLeftSidebar');
                     if (leftBar && leftBar.classList.contains('collapsed')) {
                         leftBar.classList.remove('collapsed');
-                        tourSavedCleanupCallbacks.push(() => leftBar.classList.add('collapsed'));
+                        updateReviewLayout();
+                        tourSavedCleanupCallbacks.push(() => {
+                            leftBar.classList.add('collapsed');
+                            updateReviewLayout();
+                        });
                     }
                 },
                 demoHtml: `
@@ -5718,6 +5783,17 @@ const GUIDED_TOUR_CONFIGS = {
                 desc: '點擊「＋ 新增框 (W)」即可直接在照片上拉框；選取標記框後可複製 (B)、刪除 (Del) 或更換所屬類別。',
                 tipType: 'info',
                 tip: '新增類別名稱會立即寫入類別檔；需批次改名、合併或刪除請使用上方「類別修正」。',
+                onEnter() {
+                    const boxesBar = document.getElementById('pinnedBoxesSidebar');
+                    if (boxesBar && boxesBar.classList.contains('collapsed')) {
+                        boxesBar.classList.remove('collapsed');
+                        updateReviewLayout();
+                        tourSavedCleanupCallbacks.push(() => {
+                            boxesBar.classList.add('collapsed');
+                            updateReviewLayout();
+                        });
+                    }
+                },
                 demoHtml: `
                     <div class="tour-demo-header"><span>操作示範 · 框操作工具</span><span>快捷鍵 W / B / Del</span></div>
                     <div class="tour-demo-visual">
