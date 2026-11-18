@@ -2551,8 +2551,8 @@ function updateSaveIndicator(state, message, retry) {
         el.title = '';
     } else if (state === 'unsaved') {
         el.textContent = message || '尚未儲存';
-        el.title = '點擊暫存草稿';
-        el.onclick = () => flushUnsavedCanvasDraftIfNeeded();
+        el.title = '點擊立即儲存 (Ctrl+S)';
+        el.onclick = () => manualSaveCurrentCanvas();
     } else if (state === 'error') {
         el.textContent = message || '儲存失敗（點擊重試）';
         el.title = '點擊重試';
@@ -4408,6 +4408,44 @@ async function retryLastFailedSave() {
     );
 }
 
+async function manualSaveCurrentCanvas() {
+    if (!scanData || !scanData.ok || currentStep !== 'review' || !activeStem) return false;
+    if (dragAction) {
+        showToast('請先放開滑鼠後再儲存', 'info');
+        return false;
+    }
+    if (isSavingCanvas || reviewUpdatePending) {
+        showToast('正在儲存中，請稍候', 'info');
+        return false;
+    }
+    if (lastSaveFailed && pendingSavePayload?.workspace === scanData.workspace_id) {
+        const retried = await retryLastFailedSave();
+        if (retried) {
+            showToast('已重新儲存標記資料', 'success');
+        }
+        return retried;
+    }
+    if (!dirtyCanvasStem) {
+        updateSaveIndicator('saved');
+        showToast('目前照片已是最新儲存狀態', 'info');
+        return true;
+    }
+    const targetStem = dirtyCanvasStem;
+    const targetItem = scanData.items?.find(i => i.stem === targetStem);
+    if (!targetItem) {
+        dirtyCanvasStem = null;
+        dirtyCanvasOrigState = null;
+        localCanvasUndoStack = [];
+        updateSaveIndicator('saved');
+        return true;
+    }
+    const saved = await saveCanvasBoxesToDisk(targetItem.stem, targetItem.boxes, { confirm: false });
+    if (saved) {
+        showToast(`已儲存 ${targetItem.image_name || targetItem.stem} 的標記資料`, 'success');
+    }
+    return saved;
+}
+
 // ============================================================================
 // 審核確認、標記需修正、切換上下張與鍵盤快捷鍵
 // ============================================================================
@@ -4634,6 +4672,15 @@ function initKeyboardShortcuts() {
         const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
         const isEditableTarget = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable);
 
+        // Ctrl+S / ⌘+S：立即手動儲存目前修改的標記資料（不用等換張或確認）
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 's' || e.key === 'S')) {
+            if (currentStep !== 'review') return;
+            e.preventDefault();
+            if (e.repeat) return;
+            manualSaveCurrentCanvas();
+            return;
+        }
+
         // Ctrl+Z / ⌘+Z：還原上一步（輸入框內保留瀏覽器原生的文字復原；不連續觸發）
         if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
             if (isEditableTarget) return;
@@ -4800,6 +4847,10 @@ let modalOpener = null;
 
 function handleModalKey(event) {
     if (!activeModal) return false;
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && (event.key === 's' || event.key === 'S')) {
+        event.preventDefault();
+        return true;
+    }
     if (event.key === 'Escape') {
         event.preventDefault();
         if (activeModal.id === 'newBoxClassModal') {
@@ -5748,7 +5799,7 @@ const GUIDED_TOUR_CONFIGS = {
                 title: '3. 拖曳與微調標記框',
                 desc: '點擊標記框可拖曳移動，或拉動周圍白點調整尺寸；確認無誤後按 C 確認並儲存。',
                 tipType: 'info',
-                tip: '使用鍵盤方向鍵可每次微調 1 像素（搭配 Shift 為 10 像素）；切張前系統會自動保存草稿。',
+                tip: '使用鍵盤方向鍵可每次微調 1 像素（搭配 Shift 為 10 像素）；隨時按 Ctrl+S 可立即儲存，切張前系統也會自動保存草稿。',
                 demoHtml: `
                     <div class="tour-demo-header"><span>操作示範 · 拖曳與縮放</span><span>按 C 確認儲存</span></div>
                     <div class="tour-demo-visual">
