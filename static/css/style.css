@@ -929,8 +929,8 @@ select:focus {
 .welcome-landing {
     display: block;
     width: 100%;
-    max-width: 520px;
-    margin: clamp(32px, 11vh, 96px) auto 0;
+    max-width: 560px;
+    margin: clamp(20px, 7vh, 72px) auto 0;
 }
 
 .welcome-landing .welcome-hero-card {
@@ -3966,5 +3966,128 @@ td.remap-col-order {
         animation: none !important;
         transition: none !important;
         scroll-behavior: auto !important;
+    }
+}
+
+/* ============================================================================
+   Operation Manual & Quick Reference Card Links (Welcome + Shortcut Modal)
+   ============================================================================ */
+.welcome-docs-box {
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--border-light);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+#shortcutModal .modal-dialog {
+    max-width: min(640px, 95vw);
+    max-height: 92vh;
+}
+
+#shortcutModal .shortcut-table th,
+#shortcutModal .shortcut-table td {
+    padding: 7px 12px;
+}
+
+.shortcut-docs-footer {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 8px;
+}
+
+.doc-links-heading {
+    font-size: var(--type-small);
+    font-weight: 700;
+    color: var(--text-secondary);
+}
+
+.doc-links-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-2);
+}
+
+.doc-link-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-light);
+    background: var(--bg-subtle);
+}
+
+.shortcut-docs-footer .doc-link-card {
+    background: var(--bg-card);
+}
+
+.doc-link-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.doc-link-title {
+    font-size: var(--type-small);
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.25;
+    white-space: nowrap;
+}
+
+.doc-link-meta {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    line-height: 1.3;
+    margin-top: 1px;
+}
+
+.doc-link-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+}
+
+.doc-action-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border-radius: var(--radius-xs);
+    border: 1px solid var(--border-medium);
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+    line-height: 1.2;
+    transition: background var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
+}
+
+.doc-action-pill:hover {
+    background: var(--primary-blue-light);
+    border-color: var(--primary-blue);
+    color: var(--primary-blue-dark);
+}
+
+.doc-action-pill.doc-action-download {
+    border-color: rgba(40, 116, 166, 0.35);
+    background: var(--primary-blue-light);
+    color: var(--primary-blue-dark);
+}
+
+.doc-action-pill.doc-action-download:hover {
+    background: var(--primary-blue);
+    border-color: var(--primary-blue);
+    color: #FFFFFF;
+}
+
+@media (max-width: 560px) {
+    .doc-links-grid {
+        grid-template-columns: 1fr;
     }
 }

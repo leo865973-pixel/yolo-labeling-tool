@@ -13,7 +13,8 @@ const PRECACHE_ASSETS = [
     './static/css/style.css',
     './static/js/shared_rules.js',
     './static/js/web_fs_engine.js',
-    './static/js/main.js'
+    './static/js/main.js',
+    './static/docs/quick_card.pdf'
 ];
 
 self.addEventListener('install', (event) => {
